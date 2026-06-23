@@ -13,15 +13,18 @@
  *          -> + vinyl noise -> master LP -> out
  */
 
+function clampN(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
 class AudioEngine {
   constructor(seq) {
     this.seq = seq;
     this.ready = false;
     this.voices = [];          // per-voice node graphs
     this.buffers = {};         // role -> [Tone.ToneAudioBuffer] user samples
-    this.slices = [];          // per-voice {buffer, offset, duration, fadeIn, fadeOut, role}
+    this.slices = [];          // per-voice {buffer, offset, duration, fadeIn, fadeOut, role, pitch, gain, reverse}
     this.breakBuffer = null;   // the currently loaded reference loop
-    this.referenceHits = null; // all auto-detected+classified hits (for the waveform editor)
+    this.referenceHits = null; // all auto-detected+classified hits (with role)
+    this.markers = [];         // sorted slice-boundary times across the loop (chop grid)
     this._stepHandle = null;
     this.currentStep = 0;
     this.onStep = null;        // UI callback(stepIndex)
@@ -67,6 +70,9 @@ class AudioEngine {
     if (!opts.offline) await this.reverb.generate();
     this.reverb.connect(this.busSum);
     this.reverbInput = new T.Gain(1).connect(this.reverb);
+
+    // dedicated player for auditioning slice regions (routes through the bus)
+    this.auditionPlayer = new T.Player().connect(this.dryBus);
 
     // ---- per-voice graphs ------------------------------------------------
     for (let v = 0; v < this.seq.numVoices; v++) {
@@ -238,7 +244,7 @@ class AudioEngine {
    * find enough hits); mode 'equal' just divides the length evenly.
    * Returns [{ offset, duration }] in seconds.
    */
-  static sliceBuffer(audioBuffer, numSlices, mode) {
+  static sliceBuffer(audioBuffer, numSlices, mode, threshFrac) {
     const sr = audioBuffer.sampleRate;
     const len = audioBuffer.length;
     const dur = len / sr;
@@ -262,8 +268,8 @@ class AudioEngine {
     let peak = 0; for (const o of env) if (o.e > peak) peak = o.e;
     if (peak <= 0) return equal();
 
-    const thresh = peak * 0.18;
-    const minGap = 0.05; // 50ms between onsets
+    const thresh = peak * (threshFrac || 0.18);
+    const minGap = 0.04; // min gap between onsets
     const onsets = []; let last = -minGap;
     for (let i = 1; i < env.length; i++) {
       if (env[i].e > thresh && env[i - 1].e <= thresh && env[i].t - last > minGap) {
@@ -316,7 +322,7 @@ class AudioEngine {
     return this._applyBreak(buf, opts);
   }
 
-  clearBreak() { this.slices = []; this.breakBuffer = null; this.referenceHits = null; }
+  clearBreak() { this.slices = []; this.breakBuffer = null; this.referenceHits = null; this.markers = []; }
 
   // ---- one-shot extraction (classify a break's hits into role banks) -----
   static _onePoleLP(data, sr, fc) {
@@ -376,28 +382,85 @@ class AudioEngine {
    * Keeps the full hit list + buffer for the waveform editor. Each voice then
    * plays its detected kick / snare / hat etc. Returns { hits, byRole }.
    */
-  _applyReference(buf) {
+  _applyReference(buf, sensitivity) {
     const ab = buf.get();
-    const hits = AudioEngine.analyzeHits(ab);
     this.breakBuffer = buf;
-    this.referenceHits = hits;
+    this.referenceHits = AudioEngine.analyzeHits(ab);
+    this.detectMarkers(sensitivity == null ? 0.5 : sensitivity);
+    this.autoAssign();
+    const counts = {}; for (const h of this.referenceHits) counts[h.role] = (counts[h.role] || 0) + 1;
+    return { hits: this.referenceHits, byRole: counts, markers: this.markers.length - 1 };
+  }
+
+  // Build the chop grid (slice boundaries) from transient detection.
+  // sensitivity 0..1 — higher finds more, quieter onsets.
+  detectMarkers(sensitivity) {
+    if (!this.breakBuffer) return;
+    const ab = this.breakBuffer.get();
+    const dur = ab.duration;
+    const threshold = 0.05 + (1 - clampN(sensitivity, 0, 1)) * 0.4; // 0.05..0.45 of peak
+    const hits = AudioEngine.sliceBuffer(ab, 999, 'transient', threshold);
+    const ts = hits.map((h) => h.offset).filter((t) => t > 0.005);
+    this.markers = [0].concat(ts).concat([dur]);
+    this._dedupeMarkers();
+  }
+
+  _dedupeMarkers() {
+    this.markers.sort((a, b) => a - b);
+    const out = []; for (const t of this.markers) { if (!out.length || t - out[out.length - 1] > 0.012) out.push(t); }
+    this.markers = out;
+  }
+
+  regionCount() { return Math.max(0, this.markers.length - 1); }
+  region(i) { return { offset: this.markers[i], duration: this.markers[i + 1] - this.markers[i] }; }
+
+  // role label for a region = classification of its strongest detected hit inside it
+  regionRole(i) {
+    const r = this.region(i); let best = null;
+    for (const h of (this.referenceHits || [])) {
+      if (h.offset >= r.offset - 0.005 && h.offset < r.offset + r.duration) {
+        if (!best || h.peak > best.peak) best = h;
+      }
+    }
+    return best ? best.role : 'perc1';
+  }
+
+  addMarker(t) { this.markers.push(t); this._dedupeMarkers(); }
+  removeMarker(i) { if (i > 0 && i < this.markers.length - 1) this.markers.splice(i, 1); }
+  moveMarker(i, t) {
+    if (i <= 0 || i >= this.markers.length - 1) return;
+    const lo = this.markers[i - 1] + 0.012, hi = this.markers[i + 1] - 0.012;
+    this.markers[i] = clampN(t, lo, hi);
+  }
+
+  // Snapshot a region as the slice played by voice v (with default per-slice params).
+  assignRegionToVoice(regionIndex, v) {
+    const r = this.region(regionIndex);
+    this.slices[v] = {
+      buffer: this.breakBuffer, offset: r.offset, duration: r.duration,
+      fadeIn: 0.001, fadeOut: 0.012, role: this.regionRole(regionIndex),
+      pitch: 0, gain: 1, reverse: false
+    };
+    this._refreshReverse(this.slices[v]);
+  }
+
+  // Auto-assign the loudest region of each role to the matching voice.
+  autoAssign() {
     this.slices = [];
-
     const byRole = {};
-    for (const h of hits) (byRole[h.role] = byRole[h.role] || []).push(h);
-    for (const role in byRole) byRole[role].sort((a, b) => b.peak - a.peak); // loudest first
-
+    for (let i = 0; i < this.regionCount(); i++) {
+      const role = this.regionRole(i);
+      const r = this.region(i);
+      let peak = 0; const h = (this.referenceHits || []).find((x) => x.offset >= r.offset - 0.005 && x.offset < r.offset + r.duration);
+      if (h) peak = h.peak;
+      (byRole[role] = byRole[role] || []).push({ i, peak });
+    }
+    for (const role in byRole) byRole[role].sort((a, b) => b.peak - a.peak);
     for (let v = 0; v < this.seq.numVoices; v++) {
       const role = this.seq.voices[v].role;
       const pick = byRole[role] && byRole[role][0];
-      this.slices[v] = pick ? {
-        buffer: buf, offset: pick.offset,
-        duration: Math.min(pick.duration, 0.6),
-        fadeIn: 0.001, fadeOut: 0.012, role
-      } : null;
+      if (pick) this.assignRegionToVoice(pick.i, v); else this.slices[v] = null;
     }
-    const counts = {}; for (const r in byRole) counts[r] = byRole[r].length;
-    return { hits, byRole: counts };
   }
 
   async loadReferenceFromFile(file) {
@@ -413,12 +476,28 @@ class AudioEngine {
     return this._applyReference(buf);
   }
 
-  // Re-point a voice's slice to a specific detected hit (for manual fixes).
-  assignHitToVoice(voiceIndex, hit) {
-    this.slices[voiceIndex] = {
-      buffer: this.breakBuffer, offset: hit.offset,
-      duration: Math.min(hit.duration, 0.6), fadeIn: 0.001, fadeOut: 0.012, role: hit.role
-    };
+  // Build/cache a reversed copy of a slice's region when reverse is enabled.
+  _refreshReverse(slice) {
+    if (!slice) return;
+    if (!slice.reverse) { slice._revBuffer = null; return; }
+    const ab = slice.buffer.get();
+    const sr = ab.sampleRate, nch = ab.numberOfChannels;
+    const s0 = Math.floor(slice.offset * sr), len = Math.max(1, Math.floor(slice.duration * sr));
+    const out = Tone.getContext().createBuffer(nch, len, sr);
+    for (let c = 0; c < nch; c++) {
+      const src = ab.getChannelData(c), dst = out.getChannelData(c);
+      for (let i = 0; i < len; i++) dst[i] = src[Math.min(src.length - 1, s0 + (len - 1 - i))];
+    }
+    slice._revBuffer = new Tone.ToneAudioBuffer(out);
+  }
+
+  // Audition an arbitrary region (not necessarily assigned) through the master bus.
+  auditionRegion(regionIndex, time) {
+    if (!this.breakBuffer || !this.auditionPlayer) return;
+    const r = this.region(regionIndex);
+    const pl = this.auditionPlayer;
+    pl.buffer = this.breakBuffer; pl.fadeIn = 0.001; pl.fadeOut = 0.01;
+    pl.start(time != null ? time : Tone.now() + 0.02, r.offset, r.duration);
   }
 
   // Copy the auto-classified hits into per-role sample banks (durable one-shots).
@@ -461,18 +540,21 @@ class AudioEngine {
 
     // priority: user one-shot for this role > break slice > built-in synth
     let buf = null, offset = 0, duration = null, fadeIn = 0, fadeOut = 0.003;
+    let pitch = def.pitch || 0, gain = 1;
     if (bank && bank[def.sampleIndex]) buf = bank[def.sampleIndex].buffer;
     else if (slice) {
-      buf = slice.buffer; offset = slice.offset; duration = slice.duration;
+      if (slice.reverse && slice._revBuffer) { buf = slice._revBuffer; offset = 0; duration = slice.duration; }
+      else { buf = slice.buffer; offset = slice.offset; duration = slice.duration; }
       fadeIn = slice.fadeIn || 0; fadeOut = slice.fadeOut || 0;
+      pitch += slice.pitch || 0; gain = slice.gain == null ? 1 : slice.gain;
     }
 
     if (buf) {
       const pl = voice.player;
       if (pl.buffer !== buf) pl.buffer = buf;
       pl.fadeIn = fadeIn; pl.fadeOut = fadeOut;
-      pl.playbackRate = Math.pow(2, (def.pitch || 0) / 12);
-      pl.volume.value = Tone.gainToDb(velocity);
+      pl.playbackRate = Math.pow(2, pitch / 12);
+      pl.volume.value = Tone.gainToDb(Math.max(0.0001, velocity * gain));
       // a single persistent Player rejects non-increasing start times; nudge by
       // a sub-millisecond so colliding ratchet/humanized hits still fire.
       const t = Math.max(time, (voice._lastStart || 0) + 0.0006);
