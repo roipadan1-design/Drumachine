@@ -19,8 +19,9 @@ class AudioEngine {
     this.ready = false;
     this.voices = [];          // per-voice node graphs
     this.buffers = {};         // role -> [Tone.ToneAudioBuffer] user samples
-    this.slices = [];          // per-voice {buffer, offset, duration} from a chopped break
-    this.breakBuffer = null;   // the currently loaded break (for reference/UI)
+    this.slices = [];          // per-voice {buffer, offset, duration, fadeIn, fadeOut, role}
+    this.breakBuffer = null;   // the currently loaded reference loop
+    this.referenceHits = null; // all auto-detected+classified hits (for the waveform editor)
     this._stepHandle = null;
     this.currentStep = 0;
     this.onStep = null;        // UI callback(stepIndex)
@@ -315,7 +316,7 @@ class AudioEngine {
     return this._applyBreak(buf, opts);
   }
 
-  clearBreak() { this.slices = []; this.breakBuffer = null; }
+  clearBreak() { this.slices = []; this.breakBuffer = null; this.referenceHits = null; }
 
   // ---- one-shot extraction (classify a break's hits into role banks) -----
   static _onePoleLP(data, sr, fc) {
@@ -329,52 +330,115 @@ class AudioEngine {
   static classifyHit(f, dur) {
     const total = f.low + f.mid + f.high + 1e-9;
     const lr = f.low / total, mr = f.mid / total, hr = f.high / total;
-    if (lr > 0.5 && f.zcr < 0.06) return 'kick';
-    if (hr > 0.42 || f.zcr > 0.16) return dur > 0.18 ? 'hat_open' : 'hat_closed';
-    if (mr > 0.38) return 'snare';
-    if (lr >= mr && lr >= hr) return 'perc1';
+    // kick: low energy dominates and it's tonal (few zero crossings)
+    if (lr > 0.45 && f.zcr < 0.08) return 'kick';
+    // hats / cymbals: high band dominates or very noisy; length splits closed/open
+    if (hr > 0.4 || f.zcr > 0.17) return dur > 0.16 ? 'hat_open' : 'hat_closed';
+    // clap: noisy + mid-heavy but not as bright as a hat
+    if (mr > 0.3 && f.zcr > 0.1 && hr > 0.2) return 'clap';
+    // snare: mid-dominant body
+    if (mr > 0.34) return 'snare';
+    // leftover low-ish hits -> toms/perc
+    if (lr >= hr) return 'perc1';
     return 'perc2';
   }
 
   /*
-   * Analyse the loaded break: detect every hit, classify it, copy the region
-   * into its own buffer and add it to that role's bank. The 8-voice machine
-   * then plays the extracted kit (banks take priority over slices). Returns a
-   * per-role count summary. `maxPerRole` caps how many variants each bank keeps.
+   * Detect every hit in a buffer and classify each. Returns
+   *   [{ offset, duration, role, peak, low, mid, high, zcr }]
+   * sorted by time. Shared by extractOneShots() and loadReference().
    */
+  static analyzeHits(ab) {
+    const sr = ab.sampleRate;
+    const data = ab.getChannelData(0);
+    const hits = AudioEngine.sliceBuffer(ab, 999, 'transient');
+    const lp150 = AudioEngine._onePoleLP(data, sr, 150);
+    const lp1500 = AudioEngine._onePoleLP(data, sr, 1500);
+    const lp6000 = AudioEngine._onePoleLP(data, sr, 6000);
+    return hits.map((h) => {
+      const s0 = Math.floor(h.offset * sr);
+      const aEnd = Math.min(data.length, s0 + Math.floor(0.06 * sr)); // 60ms body
+      let low = 0, mid = 0, high = 0, zc = 0, peak = 0; const nn = Math.max(1, aEnd - s0);
+      for (let i = s0; i < aEnd; i++) {
+        const lo = lp150[i], md = lp1500[i] - lp150[i], hi = data[i] - lp6000[i];
+        low += lo * lo; mid += md * md; high += hi * hi;
+        const a = Math.abs(data[i]); if (a > peak) peak = a;
+        if (i > s0 && ((data[i] >= 0) !== (data[i - 1] >= 0))) zc++;
+      }
+      const f = { low: Math.sqrt(low / nn), mid: Math.sqrt(mid / nn), high: Math.sqrt(high / nn), zcr: zc / nn };
+      return { offset: h.offset, duration: h.duration, role: AudioEngine.classifyHit(f, h.duration), peak, ...f };
+    });
+  }
+
+  /*
+   * Load a reference loop, auto-detect + classify its hits, and assign the
+   * loudest hit of each role to the matching voice as a slice (with fades).
+   * Keeps the full hit list + buffer for the waveform editor. Each voice then
+   * plays its detected kick / snare / hat etc. Returns { hits, byRole }.
+   */
+  _applyReference(buf) {
+    const ab = buf.get();
+    const hits = AudioEngine.analyzeHits(ab);
+    this.breakBuffer = buf;
+    this.referenceHits = hits;
+    this.slices = [];
+
+    const byRole = {};
+    for (const h of hits) (byRole[h.role] = byRole[h.role] || []).push(h);
+    for (const role in byRole) byRole[role].sort((a, b) => b.peak - a.peak); // loudest first
+
+    for (let v = 0; v < this.seq.numVoices; v++) {
+      const role = this.seq.voices[v].role;
+      const pick = byRole[role] && byRole[role][0];
+      this.slices[v] = pick ? {
+        buffer: buf, offset: pick.offset,
+        duration: Math.min(pick.duration, 0.6),
+        fadeIn: 0.001, fadeOut: 0.012, role
+      } : null;
+    }
+    const counts = {}; for (const r in byRole) counts[r] = byRole[r].length;
+    return { hits, byRole: counts };
+  }
+
+  async loadReferenceFromFile(file) {
+    const url = URL.createObjectURL(file);
+    const buf = new Tone.ToneAudioBuffer();
+    await buf.load(url);
+    URL.revokeObjectURL(url);
+    return this._applyReference(buf);
+  }
+  async loadReferenceFromURL(url) {
+    const buf = new Tone.ToneAudioBuffer();
+    await buf.load(url);
+    return this._applyReference(buf);
+  }
+
+  // Re-point a voice's slice to a specific detected hit (for manual fixes).
+  assignHitToVoice(voiceIndex, hit) {
+    this.slices[voiceIndex] = {
+      buffer: this.breakBuffer, offset: hit.offset,
+      duration: Math.min(hit.duration, 0.6), fadeIn: 0.001, fadeOut: 0.012, role: hit.role
+    };
+  }
+
+  // Copy the auto-classified hits into per-role sample banks (durable one-shots).
   extractOneShots(opts) {
     opts = opts || {};
     const maxPerRole = opts.maxPerRole || 6;
     if (!this.breakBuffer) return null;
     const ab = this.breakBuffer.get();
-    const sr = ab.sampleRate;
-    const data = ab.getChannelData(0);
-    const nch = ab.numberOfChannels;
-
-    const hits = AudioEngine.sliceBuffer(ab, 999, 'transient'); // all onsets
-    const lp150 = AudioEngine._onePoleLP(data, sr, 150);
-    const lp1500 = AudioEngine._onePoleLP(data, sr, 1500);
-    const lp6000 = AudioEngine._onePoleLP(data, sr, 6000);
+    const sr = ab.sampleRate, nch = ab.numberOfChannels;
+    const hits = this.referenceHits || AudioEngine.analyzeHits(ab);
 
     if (opts.reset) this.buffers = {};
     const summary = {};
     for (const h of hits) {
-      const s0 = Math.floor(h.offset * sr);
-      const aEnd = Math.min(data.length, s0 + Math.floor(0.06 * sr)); // 60ms body
-      let low = 0, mid = 0, high = 0, zc = 0; const nn = Math.max(1, aEnd - s0);
-      for (let i = s0; i < aEnd; i++) {
-        const lo = lp150[i], md = lp1500[i] - lp150[i], hi = data[i] - lp6000[i];
-        low += lo * lo; mid += md * md; high += hi * hi;
-        if (i > s0 && ((data[i] >= 0) !== (data[i - 1] >= 0))) zc++;
-      }
-      const f = { low: Math.sqrt(low / nn), mid: Math.sqrt(mid / nn), high: Math.sqrt(high / nn), zcr: zc / nn };
-      const role = AudioEngine.classifyHit(f, h.duration);
-
+      const role = h.role;
       if (!this.buffers[role]) this.buffers[role] = [];
       if (this.buffers[role].length >= maxPerRole) continue;
-
       const dur = Math.min(h.duration, 0.5);
       const len = Math.max(1, Math.floor(dur * sr));
+      const s0 = Math.floor(h.offset * sr);
       const out = Tone.getContext().createBuffer(nch, len, sr);
       for (let c = 0; c < nch; c++) {
         const src = ab.getChannelData(c), dst = out.getChannelData(c);
@@ -384,7 +448,7 @@ class AudioEngine {
       summary[role] = (summary[role] || 0) + 1;
     }
     for (let v = 0; v < this.seq.numVoices; v++) this.seq.voices[v].sampleIndex = 0;
-    this.clearBreak(); // extracted one-shots replace the chop
+    this.clearBreak();
     return summary;
   }
 
@@ -396,13 +460,17 @@ class AudioEngine {
     const slice = this.slices[voiceIndex];
 
     // priority: user one-shot for this role > break slice > built-in synth
-    let buf = null, offset = 0, duration = null;
+    let buf = null, offset = 0, duration = null, fadeIn = 0, fadeOut = 0.003;
     if (bank && bank[def.sampleIndex]) buf = bank[def.sampleIndex].buffer;
-    else if (slice) { buf = slice.buffer; offset = slice.offset; duration = slice.duration; }
+    else if (slice) {
+      buf = slice.buffer; offset = slice.offset; duration = slice.duration;
+      fadeIn = slice.fadeIn || 0; fadeOut = slice.fadeOut || 0;
+    }
 
     if (buf) {
       const pl = voice.player;
       if (pl.buffer !== buf) pl.buffer = buf;
+      pl.fadeIn = fadeIn; pl.fadeOut = fadeOut;
       pl.playbackRate = Math.pow(2, (def.pitch || 0) / 12);
       pl.volume.value = Tone.gainToDb(velocity);
       // a single persistent Player rejects non-increasing start times; nudge by
