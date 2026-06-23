@@ -81,7 +81,9 @@
   .filebtn{font-size:9px;padding:4px 7px}
   .divider{height:1px;background:var(--line);margin:14px 0}
   /* horizontal control strips (channel strip / dust) — knobs laid out in a row */
-  #voiceCtls,#dustCtls{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:4px 18px}
+  #voiceCtls,#dustCtls,#stepCtls{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:4px 18px;align-items:end}
+  .cell.off{opacity:.22}
+  select{font-family:inherit}
   #voiceCtls .seg{grid-column:span 1}
   .transport .play{min-width:92px;font-size:14px;padding:11px 20px}
   /* the sequencer & pads read left-to-right like a hardware drum machine
@@ -101,6 +103,7 @@
     <button class="play" id="playBtn">▶ PLAY</button>
     <label class="field">BPM<input type="number" id="bpm" value="86" min="40" max="200"></label>
     <button id="genBtn">✦ GENERATE</button>
+    <button id="mutateBtn">⚇ MUTATE</button>
     <button id="breakBtn">⋔ LOAD REFERENCE</button>
     <button id="extractBtn" disabled style="opacity:.45">✂ EXTRACT</button>
     <input type="file" id="breakInput" accept="audio/*" style="display:none">
@@ -210,7 +213,7 @@ function buildGrid(){
     const steps = el('div','steps');
     for(let s=0;s<seq.numSteps;s++){
       const st = seq.getStep(v,s);
-      const cls = 'cell' + (s%4===0?' beat':'') + (Math.floor(s/4)%2===1?' grp':'') + (s%4===0&&s>0?' gap':'');
+      const cls = 'cell' + (s%4===0?' beat':'') + (Math.floor(s/4)%2===1?' grp':'') + (s%4===0&&s>0?' gap':'') + (s>=(seq.voices[v].length||16)?' off':'');
       const cell = el('div', cls);
       cell.dataset.v=v; cell.dataset.s=s;
       paintCell(cell,st);
@@ -257,6 +260,9 @@ function buildVoicePanel(){
   box.appendChild(slider('Drive', d.drive,0,0.95,0.01,v=>Math.round(v*100)+'%',v=>{d.drive=v;audio.applyVoiceParams(selVoice);}));
   box.appendChild(slider('Reverb Send', d.reverbSend,0,1,0.01,v=>Math.round(v*100)+'%',v=>{d.reverbSend=v;audio.applyVoiceParams(selVoice);}));
   box.appendChild(slider('Choke Group', d.chokeGroup,0,4,1,v=>v===0?'none':v,v=>{d.chokeGroup=v;}));
+  // IDM: per-track length (polymeter) + Euclidean fill
+  box.appendChild(slider('Length (poly)', d.length||16,1,16,1,v=>v+' st',v=>{d.length=v;buildGrid();}));
+  box.appendChild(slider('Euclid', 0,0,16,1,v=>v===0?'—':v+' pulses',v=>{ if(v>0){ seq.euclid(selVoice,v,0); buildGrid(); } }));
 }
 
 function selectStep(v,s){
@@ -269,7 +275,17 @@ function selectStep(v,s){
   box.appendChild(slider('Velocity', st.velocity,0,1,0.01,x=>Math.round(x*100)+'%',x=>{st.velocity=x; if(cell)paintCell(cell,st);}));
   box.appendChild(slider('Probability', st.prob,0,1,0.01,x=>Math.round(x*100)+'%',x=>{st.prob=x;}));
   box.appendChild(slider('Nudge', st.nudge,-0.45,0.45,0.01,x=>(x>0?'+':'')+Math.round(x*100)+'%',x=>{st.nudge=x;}));
-  box.appendChild(slider('Ratchet', st.ratchet,1,4,1,x=>x+'×',x=>{st.ratchet=x;}));
+  box.appendChild(slider('Ratchet (roll)', st.ratchet,1,4,1,x=>x+'×',x=>{st.ratchet=x;}));
+  box.appendChild(slider('Pitch lock', st.pitch||0,-12,12,1,x=>(x>0?'+':'')+x+' st',x=>{st.pitch=x;}));
+  // reverse lock
+  const rc=el('div','ctl'); const rl=el('div','lab'); rl.appendChild(el('span',null,'Reverse')); rc.appendChild(rl);
+  const rb=el('button',st.reverse?'active':null,st.reverse?'ON':'OFF'); rb.style.cssText='padding:6px;width:100%';
+  rb.onclick=()=>{ st.reverse=!st.reverse; rb.classList.toggle('active'); rb.textContent=st.reverse?'ON':'OFF'; }; rc.appendChild(rb); box.appendChild(rc);
+  // trig condition
+  const cc=el('div','ctl'); const cl=el('div','lab'); cl.appendChild(el('span',null,'Trig Condition')); cc.appendChild(cl);
+  const sel=document.createElement('select'); sel.style.cssText='background:transparent;border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:6px;font-size:11px';
+  DrumSequencer.CONDITIONS.forEach(c=>{ const o=document.createElement('option'); o.value=c; o.textContent=c; if((st.cond||'always')===c)o.selected=true; sel.appendChild(o); });
+  sel.onchange=()=>{ st.cond=sel.value; }; cc.appendChild(sel); box.appendChild(cc);
 }
 
 // ---------- Dust panel ----------
@@ -320,6 +336,7 @@ document.getElementById('fileInput').onchange=async(e)=>{
 function refreshAll(){ buildGrid(); buildVoicePanel(); buildDust();
   if(selStep) selectStep(selStep.v, selStep.s); }
 document.getElementById('genBtn').onclick=()=>{ seq.generate({density:0.4+Math.random()*0.4}); refreshAll(); };
+document.getElementById('mutateBtn').onclick=()=>{ seq.mutate(0.35); refreshAll(); };
 document.getElementById('saveBtn').onclick=()=>{
   const blob=new Blob([JSON.stringify(seq.toJSON(),null,2)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);

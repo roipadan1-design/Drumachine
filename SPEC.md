@@ -55,8 +55,19 @@ So the instrument supports **both**:
 - [x] Sample auto-loading via manifest
 - [x] Real BoC breaks chopped + demos rendered (Roygbiv/Aquarius/Telephasic)
 - [x] One-shot auto-extraction: classify hits by band balance into role banks
-- [ ] Wire extracted kits / breaks into the offline render for kit demos
+- [x] IDM/glitch sequencing: per-step pitch + reverse locks, trig
+      conditions, polymeter (per-track length), Euclidean generator, Mutate
+- [ ] Glitch FX module (stutter / beat-repeat / granular)
+- [ ] Fix synth-only offline render (Tone instruments silent in Tone.Offline)
 - [ ] Build the Max for Live device around the shared engine
+
+## IDM / glitch features
+Per-step parameter locks (pitch, reverse) and **trig conditions**
+(`1:2 2:2 1:3 1:4 … first !first fill !fill`) for evolving patterns;
+**polymeter** via per-track length; a **Euclidean** generator per track;
+and **Mutate** for aleatoric evolution. Researched against Elektron
+(p-locks / conditions / euclid) and glitch tools (Glitch 2, Effectrix,
+Stutter Edit).
 
 ## Roadmap / open questions for next pass
 1. Polymeter (per-voice step length) — deferred, easy to add to the engine.

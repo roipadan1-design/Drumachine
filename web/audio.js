@@ -124,8 +124,8 @@ class AudioEngine {
         const s = new T.MembraneSynth({ pitchDecay: 0.045, octaves: 4.5,
           oscillator: { type: 'sine' },
           envelope: { attack: 0.001, decay: 0.34, sustain: 0, release: 0.12 } }).connect(out);
-        return { node: s, play: (t, v, d) => {
-          const semis = (d && d.pitch) || 0;
+        return { node: s, play: (t, v, d, p) => {
+          const semis = p || 0;
           s.detune.setValueAtTime(wob(8), t);
           s.triggerAttackRelease(Tone.Frequency('C1').transpose(semis), 0.32, t, 0.85 * v + 0.1);
         }};
@@ -166,8 +166,8 @@ class AudioEngine {
       case 'perc1': {
         const s = new T.MembraneSynth({ pitchDecay: 0.02, octaves: 3,
           envelope: { attack: 0.001, decay: 0.18, sustain: 0 } }).connect(out);
-        return { node: s, play: (t, v) => {
-          s.detune.setValueAtTime(wob(15), t);
+        return { node: s, play: (t, v, d, p) => {
+          s.detune.setValueAtTime(wob(15) + (p || 0) * 100, t);
           s.triggerAttackRelease('G3', 0.16, t, v);
         }};
       }
@@ -182,8 +182,8 @@ class AudioEngine {
       default: { // fx / tom — low, hollow
         const s = new T.MembraneSynth({ pitchDecay: 0.08, octaves: 2.5,
           envelope: { attack: 0.002, decay: 0.5, sustain: 0 } }).connect(out);
-        return { node: s, play: (t, v, d) => {
-          const semis = (d && d.pitch) || 0;
+        return { node: s, play: (t, v, d, p) => {
+          const semis = p || 0;
           s.triggerAttackRelease(Tone.Frequency('A1').transpose(semis), 0.45, t, v);
         }};
       }
@@ -476,10 +476,10 @@ class AudioEngine {
     return this._applyReference(buf);
   }
 
-  // Build/cache a reversed copy of a slice's region when reverse is enabled.
+  // Build/cache a reversed copy of a slice's region (always, so per-step
+  // reverse locks can flip direction independent of the slice's own setting).
   _refreshReverse(slice) {
     if (!slice) return;
-    if (!slice.reverse) { slice._revBuffer = null; return; }
     const ab = slice.buffer.get();
     const sr = ab.sampleRate, nch = ab.numberOfChannels;
     const s0 = Math.floor(slice.offset * sr), len = Math.max(1, Math.floor(slice.duration * sr));
@@ -532,18 +532,22 @@ class AudioEngine {
   }
 
   // ---- triggering --------------------------------------------------------
-  trigger(voiceIndex, time, velocity) {
+  // ev (optional): per-step locks { pitch, reverse } from the sequencer.
+  trigger(voiceIndex, time, velocity, ev) {
     const voice = this.voices[voiceIndex];
     const def = this.seq.voices[voiceIndex];
     const bank = this.buffers[def.role];
     const slice = this.slices[voiceIndex];
+    const lockPitch = ev && ev.pitch || 0;
+    const lockRev = !!(ev && ev.reverse);
 
     // priority: user one-shot for this role > break slice > built-in synth
     let buf = null, offset = 0, duration = null, fadeIn = 0, fadeOut = 0.003;
-    let pitch = def.pitch || 0, gain = 1;
+    let pitch = (def.pitch || 0) + lockPitch, gain = 1;
     if (bank && bank[def.sampleIndex]) buf = bank[def.sampleIndex].buffer;
     else if (slice) {
-      if (slice.reverse && slice._revBuffer) { buf = slice._revBuffer; offset = 0; duration = slice.duration; }
+      const rev = (!!slice.reverse) !== lockRev; // XOR: per-step lock flips it
+      if (rev && slice._revBuffer) { buf = slice._revBuffer; offset = 0; duration = slice.duration; }
       else { buf = slice.buffer; offset = slice.offset; duration = slice.duration; }
       fadeIn = slice.fadeIn || 0; fadeOut = slice.fadeOut || 0;
       pitch += slice.pitch || 0; gain = slice.gain == null ? 1 : slice.gain;
@@ -562,7 +566,7 @@ class AudioEngine {
       if (duration != null) pl.start(t, offset, duration);
       else pl.start(t, offset);
     } else {
-      voice.synth.play(time, velocity, def);
+      voice.synth.play(time, velocity, def, pitch);
     }
 
     // choke groups: cut other voices sharing the group
@@ -579,18 +583,20 @@ class AudioEngine {
   // ---- transport ---------------------------------------------------------
   start() {
     if (this._stepHandle !== null) return;
-    this.currentStep = 0;
+    this.absStep = 0;
     this.voices.forEach((v) => { v._lastStart = 0; });
     const sixteenth = Tone.Time('16n').toSeconds();
+    const nsteps = this.seq.numSteps;
     this._stepHandle = Tone.Transport.scheduleRepeat((time) => {
-      const i = this.currentStep;
-      if (i === 0) this.seq.advanceChain();
-      const events = this.seq.eventsForStep(i);
+      const abs = this.absStep;
+      if (abs % nsteps === 0) this.seq.advanceChain();
+      const events = this.seq.eventsForStep(abs);
       for (const ev of events) {
-        this.trigger(ev.voice, time + ev.offset * sixteenth, ev.velocity);
+        this.trigger(ev.voice, time + ev.offset * sixteenth, ev.velocity, ev);
       }
-      if (this.onStep) Tone.Draw.schedule(() => this.onStep(i), time);
-      this.currentStep = (i + 1) % this.seq.numSteps;
+      const local = abs % nsteps;
+      if (this.onStep) Tone.Draw.schedule(() => this.onStep(local), time);
+      this.absStep = abs + 1;
     }, '16n');
     Tone.Transport.start();
   }
@@ -678,13 +684,13 @@ class AudioEngine {
       Tone.Transport.position = 0;
       Tone.Transport.bpm.value = bpm;
       const sixteenth = Tone.Time('16n').toSeconds();
-      let step = 0;
+      const nsteps = seq.numSteps;
+      let abs = 0;
       Tone.Transport.scheduleRepeat((time) => {
-        const i = step;
-        if (i === 0) seq.advanceChain();
-        seq.eventsForStep(i).forEach((ev) =>
-          eng.trigger(ev.voice, time + ev.offset * sixteenth, ev.velocity));
-        step = (i + 1) % seq.numSteps;
+        if (abs % nsteps === 0) seq.advanceChain();
+        seq.eventsForStep(abs).forEach((ev) =>
+          eng.trigger(ev.voice, time + ev.offset * sixteenth, ev.velocity, ev));
+        abs = abs + 1;
       }, '16n');
       Tone.Transport.start();
     }, seconds, 2, 44100);

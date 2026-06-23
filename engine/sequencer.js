@@ -44,13 +44,36 @@
 
   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+  // Elektron-style trig conditions: decide if a step fires on this loop pass.
+  var CONDITIONS = ['always', '1:2', '2:2', '1:3', '1:4', '2:4', '3:4', '4:4', 'first', '!first', 'fill', '!fill'];
+  function condMet(cond, loop, fill, rng) {
+    switch (cond) {
+      case undefined: case 'always': return true;
+      case '1:2': return loop % 2 === 0;
+      case '2:2': return loop % 2 === 1;
+      case '1:3': return loop % 3 === 0;
+      case '1:4': return loop % 4 === 0;
+      case '2:4': return loop % 4 === 1;
+      case '3:4': return loop % 4 === 2;
+      case '4:4': return loop % 4 === 3;
+      case 'first': return loop === 0;
+      case '!first': return loop !== 0;
+      case 'fill': return !!fill;
+      case '!fill': return !fill;
+      default: return true;
+    }
+  }
+
   function makeStep() {
     return {
       on: false,
       velocity: 1.0,   // 0..1
       prob: 1.0,       // 0..1 chance the step fires
       nudge: 0.0,      // -0.5..0.5 of a step (micro-timing)
-      ratchet: 1       // 1..4 sub-hits within the step
+      ratchet: 1,      // 1..4 sub-hits within the step
+      pitch: 0,        // per-step pitch lock (semitones), added to the voice pitch
+      reverse: false,  // per-step reverse lock (samples/slices)
+      cond: 'always'   // trig condition (see CONDITIONS): evolving patterns
     };
   }
 
@@ -71,6 +94,7 @@
       chokeGroup: 0,   // 0 = none; voices sharing a group cut each other
       mute: false,
       solo: false,
+      length: NUM_STEPS, // per-track length 1..16 for polymeter (IDM phasing)
       sampleIndex: 0   // which sample in the role's bank is selected
     };
   }
@@ -109,12 +133,14 @@
     this.swing = 0.0;       // 0..1  (0 = straight, ~0.5 = heavy)
     this.humanizeTime = 0.0;// 0..1  random timing jitter
     this.humanizeVel = 0.0; // 0..1  random velocity jitter
+    this.fill = false;      // host sets true to trigger 'fill' conditioned steps
 
     this.rng = opts.rng || Math.random;
   }
 
   DrumSequencer.PATTERN_SLOTS = PATTERN_SLOTS;
   DrumSequencer.VOICE_DEFS = VOICE_DEFS;
+  DrumSequencer.CONDITIONS = CONDITIONS;
 
   DrumSequencer.prototype.pattern = function () {
     return this.patterns[this.current];
@@ -162,29 +188,34 @@
    *   - ratchetIndex/Count let the host place sub-hits inside the step.
    * The host multiplies `offset` by the seconds-per-16th to get real time.
    */
-  DrumSequencer.prototype.eventsForStep = function (stepIndex) {
-    var pat = this.pattern();
-    var len = pat.length;
-    var i = ((stepIndex % len) + len) % len;
+  DrumSequencer.prototype.eventsForStep = function (absStep) {
+    var nsteps = this.numSteps;
+    var loop = Math.floor(absStep / nsteps); // which pass through the pattern (for conditions)
     var out = [];
-
-    // swing pushes every odd 16th later
-    var swingOffset = (i % 2 === 1) ? this.swing * 0.5 : 0;
 
     var anySolo = false;
     for (var sv = 0; sv < this.numVoices; sv++) {
       if (this.voices[sv].solo) { anySolo = true; break; }
     }
 
+    var pat = this.pattern();
     for (var v = 0; v < this.numVoices; v++) {
       var voice = this.voices[v];
       if (voice.mute) continue;
       if (anySolo && !voice.solo) continue;
 
+      // per-track length -> polymeter: each track wraps at its own length
+      var vlen = clamp(voice.length || nsteps, 1, nsteps);
+      var i = ((absStep % vlen) + vlen) % vlen;
+      var vloop = Math.floor(absStep / vlen);
+
       var st = pat.steps[v][i];
       if (!st.on) continue;
+      if (!condMet(st.cond, vloop, this.fill, this.rng)) continue;
       if (st.prob < 1.0 && this.rng() > st.prob) continue;
 
+      // swing pushes every odd 16th later
+      var swingOffset = (i % 2 === 1) ? this.swing * 0.5 : 0;
       var rc = clamp(st.ratchet | 0, 1, 4);
       for (var r = 0; r < rc; r++) {
         var humTime = this.humanizeTime ? (this.rng() - 0.5) * this.humanizeTime * 0.5 : 0;
@@ -196,6 +227,8 @@
           sampleIndex: voice.sampleIndex,
           velocity: clamp(st.velocity + humVel, 0, 1),
           offset: clamp(baseOffset + humTime, -0.5, rc), // ratchets may exceed 0.5
+          pitch: st.pitch || 0,
+          reverse: !!st.reverse,
           ratchetIndex: r,
           ratchetCount: rc
         });
@@ -268,6 +301,63 @@
     this.swing = 0.12 + rng() * 0.14;
     this.humanizeTime = 0.15 + rng() * 0.2;
     this.humanizeVel = 0.1 + rng() * 0.15;
+    return this;
+  };
+
+  // ---- Euclidean rhythms ---------------------------------------------------
+  /*
+   * Distribute `pulses` hits as evenly as possible across the voice's length
+   * (Bjorklund / Euclidean). `rotate` shifts the pattern. Classic IDM/world
+   * rhythm generator — great for evolving, non-obvious grooves.
+   */
+  DrumSequencer.prototype.euclid = function (voice, pulses, rotate, velocity) {
+    var steps = clamp(this.voices[voice].length || NUM_STEPS, 1, NUM_STEPS);
+    pulses = clamp(pulses | 0, 0, steps);
+    rotate = rotate | 0;
+    var vel = (velocity == null) ? 0.85 : velocity;
+    var arr = [];
+    if (pulses > 0) {
+      // bucket method: hit when the accumulated ratio rolls over
+      var bucket = 0;
+      for (var s = 0; s < steps; s++) {
+        bucket += pulses;
+        if (bucket >= steps) { bucket -= steps; arr.push(1); } else arr.push(0);
+      }
+    } else {
+      for (var z = 0; z < steps; z++) arr.push(0);
+    }
+    var pat = this.pattern();
+    for (var i = 0; i < steps; i++) {
+      var src = ((i - rotate) % steps + steps) % steps;
+      var st = pat.steps[voice][i];
+      st.on = !!arr[src];
+      if (st.on && st.velocity === 1.0) st.velocity = vel;
+    }
+    return this;
+  };
+
+  // ---- mutate (aleatoric evolution) ----------------------------------------
+  /*
+   * Nudge the current pattern: randomly toggles a few steps and jitters
+   * velocity / pitch locks. `amount` 0..1 scales how much changes. Repeated
+   * calls grow an evolving, IDM-style pattern from a seed.
+   */
+  DrumSequencer.prototype.mutate = function (amount) {
+    amount = (amount == null) ? 0.3 : amount;
+    var pat = this.pattern();
+    for (var v = 0; v < this.numVoices; v++) {
+      var len = clamp(this.voices[v].length || NUM_STEPS, 1, NUM_STEPS);
+      for (var s = 0; s < len; s++) {
+        var st = pat.steps[v][s];
+        if (this.rng() < amount * 0.12) st.on = !st.on;             // flip a few steps
+        if (st.on) {
+          if (this.rng() < amount * 0.3) st.velocity = clamp(st.velocity + (this.rng() - 0.5) * 0.4, 0.15, 1);
+          if (this.rng() < amount * 0.15) st.pitch = clamp((st.pitch || 0) + (this.rng() < 0.5 ? -1 : 1) * (1 + ((this.rng() * 5) | 0)), -12, 12);
+          if (this.rng() < amount * 0.1) st.reverse = !st.reverse;
+          if (this.rng() < amount * 0.08) st.ratchet = 1 + ((this.rng() * 3) | 0);
+        }
+      }
+    }
     return this;
   };
 
