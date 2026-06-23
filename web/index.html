@@ -81,6 +81,10 @@
   <div class="topbar transport">
     <button class="play" id="playBtn">▶ PLAY</button>
     <label class="field">BPM<input type="number" id="bpm" value="86" min="40" max="200"></label>
+    <button id="genBtn">✦ GENERATE</button>
+    <button id="saveBtn">⭳ SAVE</button>
+    <button id="loadBtn">⭱ LOAD</button>
+    <input type="file" id="presetInput" accept="application/json" style="display:none">
     <div class="spacer"></div>
     <div style="font-size:9px;color:var(--dim);letter-spacing:2px">PATTERN</div>
     <div class="patterns" id="patterns"></div>
@@ -224,7 +228,7 @@ function selectStep(v,s){
 }
 
 // ---------- Dust panel ----------
-const dust={wow:0,flutter:0,tape:0.15,crush:0,vinyl:0,masterLP:1};
+const dust=Object.assign({}, AudioEngine.DEFAULT_DUST);
 function buildDust(){
   const box=document.getElementById('dustCtls'); box.innerHTML='';
   box.appendChild(slider('Swing', seq.swing,0,0.6,0.01,v=>Math.round(v*100)+'%',v=>{seq.swing=v;}));
@@ -267,6 +271,25 @@ document.getElementById('fileInput').onchange=async(e)=>{
   e.target.value='';
 };
 
+// ---------- generate / presets ----------
+function refreshAll(){ buildGrid(); buildVoicePanel(); buildDust();
+  if(selStep) selectStep(selStep.v, selStep.s); }
+document.getElementById('genBtn').onclick=()=>{ seq.generate({density:0.4+Math.random()*0.4}); refreshAll(); };
+document.getElementById('saveBtn').onclick=()=>{
+  const blob=new Blob([JSON.stringify(seq.toJSON(),null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='drumachine-preset.json'; a.click(); URL.revokeObjectURL(a.href);
+};
+document.getElementById('loadBtn').onclick=()=>document.getElementById('presetInput').click();
+document.getElementById('presetInput').onchange=async(e)=>{
+  const f=e.target.files[0]; if(!f)return;
+  try{ seq.loadJSON(JSON.parse(await f.text()));
+    [...patBox.children].forEach(c=>c.classList.toggle('active',c.dataset.slot===seq.current));
+    refreshAll(); if(audio.ready){ for(let v=0;v<seq.numVoices;v++)audio.applyVoiceParams(v); }
+  }catch(err){ alert('קובץ פריסט לא תקין'); }
+  e.target.value='';
+};
+
 // ---------- boot: load a gentle BoC-ish starter groove ----------
 function seedGroove(){
   seq.swing=0.18;
@@ -280,6 +303,9 @@ function seedGroove(){
 }
 seedGroove();
 buildGrid(); buildVoicePanel(); buildDust();
+
+// expose for debugging / offline-render tooling
+window.seq = seq; window.audio = audio; window.dust = dust;
 </script>
 </body>
 </html>

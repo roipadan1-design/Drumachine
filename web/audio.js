@@ -24,9 +24,10 @@ class AudioEngine {
     this.onStep = null;        // UI callback(stepIndex)
   }
 
-  async init() {
+  async init(opts) {
+    opts = opts || {};
     if (this.ready) return;
-    await Tone.start();
+    if (!opts.offline) await Tone.start();
     const T = Tone;
 
     // ---- master Dust chain (built output-first) --------------------------
@@ -57,7 +58,9 @@ class AudioEngine {
     // dry + reverb buses both fold into busSum
     this.dryBus = new T.Gain(1).connect(this.busSum);
     this.reverb = new T.Reverb({ decay: 2.4, preDelay: 0.01, wet: 1 });
-    await this.reverb.generate();
+    // generating the IR runs its own offline render; skip when we're already
+    // inside Tone.Offline (nested renders are unreliable). Sends default to 0.
+    if (!opts.offline) await this.reverb.generate();
     this.reverb.connect(this.busSum);
     this.reverbInput = new T.Gain(1).connect(this.reverb);
 
@@ -89,30 +92,86 @@ class AudioEngine {
     return { index, role, vol, pan, drive, filter, sendGain, player: null, synth: this._makeSynth(role, filter) };
   }
 
-  // Built-in BoC-leaning synth voices (soft, filtered, a touch dusty).
+  /*
+   * Built-in BoC-leaning synth voices. Each returns an object with
+   *   play(time, velocity, def)
+   * so the trigger path is uniform and the character lives here. The aim is
+   * soft, filtered and a touch detuned — nothing crisp or modern. Hats are
+   * built from filtered noise (not MetalSynth) for a dustier, vintage top.
+   */
   _makeSynth(role, out) {
     const T = Tone;
+    // small, fixed pitch wobble so repeated hits aren't identical (tape-ish)
+    const wob = (cents) => (Math.random() * 2 - 1) * cents;
+
     switch (role) {
-      case 'kick':
-        return new T.MembraneSynth({ pitchDecay: 0.05, octaves: 6, envelope: { attack: 0.001, decay: 0.4, sustain: 0, release: 0.1 } }).connect(out);
-      case 'snare': {
-        const s = new T.NoiseSynth({ noise: { type: 'white' }, envelope: { attack: 0.001, decay: 0.18, sustain: 0 } });
-        const body = new T.Filter({ type: 'bandpass', frequency: 1800, Q: 0.8 }).connect(out);
-        s.connect(body);
-        return s;
+      case 'kick': {
+        const s = new T.MembraneSynth({ pitchDecay: 0.045, octaves: 4.5,
+          oscillator: { type: 'sine' },
+          envelope: { attack: 0.001, decay: 0.34, sustain: 0, release: 0.12 } }).connect(out);
+        return { node: s, play: (t, v, d) => {
+          const semis = (d && d.pitch) || 0;
+          s.detune.setValueAtTime(wob(8), t);
+          s.triggerAttackRelease(Tone.Frequency('C1').transpose(semis), 0.32, t, 0.85 * v + 0.1);
+        }};
       }
-      case 'clap':
-        return new T.NoiseSynth({ noise: { type: 'pink' }, envelope: { attack: 0.002, decay: 0.13, sustain: 0 } }).connect(out);
+      case 'snare': {
+        // muffled body (bandpass noise) + a soft tonal thud underneath
+        const noise = new T.NoiseSynth({ noise: { type: 'white' },
+          envelope: { attack: 0.001, decay: 0.14, sustain: 0 } });
+        const bp = new T.Filter({ type: 'bandpass', frequency: 1400, Q: 0.7 }).connect(out);
+        const lp = new T.Filter({ type: 'lowpass', frequency: 3200 }).connect(bp);
+        noise.connect(lp);
+        const body = new T.MembraneSynth({ pitchDecay: 0.02, octaves: 2,
+          envelope: { attack: 0.001, decay: 0.12, sustain: 0 } }).connect(out);
+        body.volume.value = -10;
+        return { node: noise, play: (t, v) => {
+          noise.triggerAttackRelease(0.14, t, v);
+          body.triggerAttackRelease('G2', 0.1, t, 0.5 * v);
+        }};
+      }
+      case 'clap': {
+        const s = new T.NoiseSynth({ noise: { type: 'pink' },
+          envelope: { attack: 0.002, decay: 0.12, sustain: 0 } });
+        const bp = new T.Filter({ type: 'bandpass', frequency: 1100, Q: 0.6 }).connect(out);
+        s.connect(bp);
+        return { node: s, play: (t, v) => s.triggerAttackRelease(0.12, t, v) };
+      }
       case 'hat_closed':
-        return new T.MetalSynth({ frequency: 320, envelope: { attack: 0.001, decay: 0.06, release: 0.01 }, harmonicity: 5.1, modulationIndex: 32, resonance: 7000, octaves: 1.5 }).connect(out);
-      case 'hat_open':
-        return new T.MetalSynth({ frequency: 320, envelope: { attack: 0.001, decay: 0.35, release: 0.1 }, harmonicity: 5.1, modulationIndex: 32, resonance: 6000, octaves: 1.5 }).connect(out);
-      case 'perc1':
-        return new T.MembraneSynth({ pitchDecay: 0.02, octaves: 4, envelope: { attack: 0.001, decay: 0.2, sustain: 0 } }).connect(out);
-      case 'perc2':
-        return new T.MetalSynth({ frequency: 200, envelope: { attack: 0.001, decay: 0.12, release: 0.02 }, harmonicity: 3.1, modulationIndex: 20, resonance: 3000, octaves: 1 }).connect(out);
-      default: // fx / tom
-        return new T.MembraneSynth({ pitchDecay: 0.1, octaves: 3, envelope: { attack: 0.002, decay: 0.5, sustain: 0 } }).connect(out);
+      case 'hat_open': {
+        const open = role === 'hat_open';
+        const s = new T.NoiseSynth({ noise: { type: 'white' },
+          envelope: { attack: 0.001, decay: open ? 0.32 : 0.045, sustain: 0, release: 0.02 } });
+        const hp = new T.Filter({ type: 'highpass', frequency: 6500, Q: 0.5 }).connect(out);
+        const lp = new T.Filter({ type: 'lowpass', frequency: 11000 }).connect(hp); // roll off the fizz
+        s.connect(lp);
+        s.volume.value = -8;
+        return { node: s, play: (t, v) => s.triggerAttackRelease(open ? 0.3 : 0.05, t, v) };
+      }
+      case 'perc1': {
+        const s = new T.MembraneSynth({ pitchDecay: 0.02, octaves: 3,
+          envelope: { attack: 0.001, decay: 0.18, sustain: 0 } }).connect(out);
+        return { node: s, play: (t, v) => {
+          s.detune.setValueAtTime(wob(15), t);
+          s.triggerAttackRelease('G3', 0.16, t, v);
+        }};
+      }
+      case 'perc2': {
+        // soft mid woodblock-ish: short bandpass noise + tonal click
+        const noise = new T.NoiseSynth({ noise: { type: 'pink' },
+          envelope: { attack: 0.001, decay: 0.07, sustain: 0 } });
+        const bp = new T.Filter({ type: 'bandpass', frequency: 2400, Q: 1.4 }).connect(out);
+        noise.connect(bp);
+        return { node: noise, play: (t, v) => noise.triggerAttackRelease(0.07, t, v) };
+      }
+      default: { // fx / tom — low, hollow
+        const s = new T.MembraneSynth({ pitchDecay: 0.08, octaves: 2.5,
+          envelope: { attack: 0.002, decay: 0.5, sustain: 0 } }).connect(out);
+        return { node: s, play: (t, v, d) => {
+          const semis = (d && d.pitch) || 0;
+          s.triggerAttackRelease(Tone.Frequency('A1').transpose(semis), 0.45, t, v);
+        }};
+      }
     }
   }
 
@@ -137,7 +196,6 @@ class AudioEngine {
     const voice = this.voices[voiceIndex];
     const def = this.seq.voices[voiceIndex];
     const bank = this.buffers[def.role];
-    const detune = (def.pitch || 0) * 100;
 
     if (bank && bank[def.sampleIndex]) {
       this._ensurePlayer(voice, bank[def.sampleIndex].buffer);
@@ -145,16 +203,8 @@ class AudioEngine {
       voice.player.playbackRate = Math.pow(2, (def.pitch || 0) / 12);
       voice.player.start(time);
     } else {
-      const s = voice.synth;
-      const dur = (0.12 + 0.5 * (def.decay || 1));
-      if (s instanceof Tone.MembraneSynth) {
-        const notes = { kick: 'C1', perc1: 'G2', fx: 'A1' };
-        s.triggerAttackRelease(notes[def.role] || 'C2', dur, time, velocity);
-      } else if (s instanceof Tone.MetalSynth) {
-        s.triggerAttackRelease(dur, time, velocity);
-      } else {
-        s.triggerAttackRelease(dur, time, velocity);
-      }
+      // uniform synth interface: each voice knows how to play itself
+      voice.synth.play(time, velocity, def);
     }
     // choke groups: cut other voices in the same group
     if (def.chokeGroup) {
@@ -229,6 +279,77 @@ class AudioEngine {
       this.masterLP.frequency.rampTo(400 + params.masterLP * 17600, 0.1);
     }
   }
+
+  // ---- offline rendering (for demo bounces) ------------------------------
+  /*
+   * Render `bars` of the current sequencer state to a WAV. Runs the exact same
+   * voice + Dust graph as live playback, just inside Tone.Offline, so a demo
+   * bounce reflects what the instrument actually sounds like.
+   * Returns a Blob (audio/wav).
+   */
+  static async renderToWavBlob(seq, opts) {
+    opts = opts || {};
+    const bpm = opts.bpm || 86;
+    const bars = opts.bars || 2;
+    const dust = Object.assign({}, AudioEngine.DEFAULT_DUST, opts.dust || {});
+    const secPerBar = (60 / bpm) * 4;
+    const seconds = bars * secPerBar + 1.2; // tail
+
+    const buffer = await Tone.Offline(async () => {
+      const eng = new AudioEngine(seq);
+      await eng.init({ offline: true });
+      for (let v = 0; v < seq.numVoices; v++) eng.applyVoiceParams(v);
+      eng.setDust(dust);
+
+      // clear any transport state left over from a previous render in this page
+      Tone.Transport.cancel(0);
+      Tone.Transport.stop();
+      Tone.Transport.position = 0;
+      Tone.Transport.bpm.value = bpm;
+      const sixteenth = Tone.Time('16n').toSeconds();
+      let step = 0;
+      Tone.Transport.scheduleRepeat((time) => {
+        const i = step;
+        if (i === 0) seq.advanceChain();
+        seq.eventsForStep(i).forEach((ev) =>
+          eng.trigger(ev.voice, time + ev.offset * sixteenth, ev.velocity));
+        step = (i + 1) % seq.numSteps;
+      }, '16n');
+      Tone.Transport.start();
+    }, seconds, 2, 44100);
+
+    return AudioEngine.encodeWAV(buffer.get());
+  }
+
+  // Minimal 16-bit PCM WAV encoder. `audioBuffer` is a native AudioBuffer.
+  static encodeWAV(audioBuffer) {
+    const numCh = audioBuffer.numberOfChannels;
+    const sr = audioBuffer.sampleRate;
+    const len = audioBuffer.length;
+    const blockAlign = numCh * 2;
+    const dataSize = len * blockAlign;
+    const ab = new ArrayBuffer(44 + dataSize);
+    const dv = new DataView(ab);
+    let p = 0;
+    const ws = (s) => { for (let i = 0; i < s.length; i++) dv.setUint8(p++, s.charCodeAt(i)); };
+    const u32 = (v) => { dv.setUint32(p, v, true); p += 4; };
+    const u16 = (v) => { dv.setUint16(p, v, true); p += 2; };
+    ws('RIFF'); u32(36 + dataSize); ws('WAVE'); ws('fmt '); u32(16); u16(1);
+    u16(numCh); u32(sr); u32(sr * blockAlign); u16(blockAlign); u16(16);
+    ws('data'); u32(dataSize);
+    const chans = [];
+    for (let c = 0; c < numCh; c++) chans.push(audioBuffer.getChannelData(c));
+    for (let i = 0; i < len; i++) {
+      for (let c = 0; c < numCh; c++) {
+        let s = Math.max(-1, Math.min(1, chans[c][i]));
+        dv.setInt16(p, s < 0 ? s * 0x8000 : s * 0x7fff, true); p += 2;
+      }
+    }
+    return new Blob([ab], { type: 'audio/wav' });
+  }
 }
 
-window.AudioEngine = AudioEngine;
+// Sensible day-one Dust settings so the instrument sounds characterful at boot.
+AudioEngine.DEFAULT_DUST = { wow: 0.18, flutter: 0.12, tape: 0.3, crush: 0.15, vinyl: 0.25, masterLP: 0.82 };
+
+if (typeof window !== 'undefined') window.AudioEngine = AudioEngine;

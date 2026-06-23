@@ -204,6 +204,73 @@
     return out;
   };
 
+  // ---- generative grooves --------------------------------------------------
+  /*
+   * Fill the current pattern with a BoC-leaning groove: laid-back kicks with a
+   * little syncopation, backbeat snare with ghosts, swung hats with velocity
+   * drift, and sparse probabilistic percussion. `density` 0..1 scales activity.
+   * Voice roles are matched by name so it adapts if the layout changes.
+   */
+  DrumSequencer.prototype.generate = function (opts) {
+    opts = opts || {};
+    var density = typeof opts.density === 'number' ? opts.density : 0.5;
+    var rng = this.rng;
+    var pat = this.pattern();
+    var len = pat.length;
+    var self = this;
+
+    function idx(role) {
+      for (var i = 0; i < self.voices.length; i++) if (self.voices[i].role === role) return i;
+      return -1;
+    }
+    function clear(v) {
+      if (v < 0) return;
+      for (var s = 0; s < len; s++) { var st = pat.steps[v][s]; st.on = false; st.ratchet = 1; st.prob = 1; st.nudge = 0; }
+    }
+    function put(v, s, props) { if (v < 0) return; var st = pat.steps[v][s % len]; st.on = true; for (var k in props) st[k] = props[k]; }
+    function chance(p) { return rng() < p; }
+
+    var K = idx('kick'), S = idx('snare'), HC = idx('hat_closed'), HO = idx('hat_open'),
+        CL = idx('clap'), P1 = idx('perc1'), P2 = idx('perc2');
+    [K, S, HC, HO, CL, P1, P2].forEach(clear);
+
+    // kick: beat 1 always, beat ~3 usually, plus syncopated ghosts
+    put(K, 0, { velocity: 0.95 });
+    if (chance(0.85)) put(K, 8, { velocity: 0.85 });
+    if (chance(0.5 + density * 0.3)) put(K, 10 + (chance(0.5) ? 1 : 0), { velocity: 0.7 });
+    if (chance(0.3 + density * 0.3)) put(K, 6, { velocity: 0.6, prob: 0.7 });
+    if (chance(0.25)) put(K, 3, { velocity: 0.55, prob: 0.6 });
+
+    // snare: backbeats with optional ghost notes
+    put(S, 4, { velocity: 0.85 });
+    put(S, 12, { velocity: 0.88 });
+    if (chance(0.4 + density * 0.4)) put(S, 7, { velocity: 0.35, prob: 0.5 });
+    if (chance(0.3 + density * 0.4)) put(S, 14, { velocity: 0.3, prob: 0.4, ratchet: chance(0.4) ? 2 : 1 });
+    if (chance(0.2)) put(CL, 12, { velocity: 0.5 }); // layer a clap on the 2nd backbeat
+
+    // closed hats: 8ths or 16ths with velocity drift + a few drops
+    var hatStep = chance(0.5) ? 2 : 1; // 8ths vs 16ths
+    for (var s = 0; s < len; s += hatStep) {
+      if (chance(0.12 - density * 0.05)) continue; // occasional gap
+      put(HC, s, { velocity: 0.35 + rng() * 0.35, prob: chance(0.85) ? 1 : 0.75 });
+    }
+    if (chance(0.7)) put(HO, chance(0.5) ? 14 : 2, { velocity: 0.5 });
+
+    // sparse found-sound percussion, probabilistic and occasionally ratcheted
+    var percHits = 1 + Math.floor(density * 3);
+    for (var n = 0; n < percHits; n++) {
+      var v = chance(0.5) ? P1 : P2;
+      put(v, Math.floor(rng() * len), { velocity: 0.3 + rng() * 0.3, prob: 0.4 + rng() * 0.4,
+        ratchet: chance(0.25) ? (chance(0.5) ? 2 : 3) : 1 });
+    }
+
+    // a touch of human feel
+    this.swing = 0.12 + rng() * 0.14;
+    this.humanizeTime = 0.15 + rng() * 0.2;
+    this.humanizeVel = 0.1 + rng() * 0.15;
+    return this;
+  };
+
   // ---- serialisation (for presets / Live set persistence) ------------------
 
   DrumSequencer.prototype.toJSON = function () {
