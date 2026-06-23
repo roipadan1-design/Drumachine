@@ -40,27 +40,36 @@
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
   .panel h2{font-size:9px;letter-spacing:2.5px;color:var(--dim);text-transform:uppercase;margin-bottom:12px}
 
-  /* grid */
-  .row{display:grid;grid-template-columns:118px 1fr;align-items:center;gap:10px;margin-bottom:7px}
-  .vlabel{display:flex;align-items:center;gap:6px;font-size:11px;cursor:pointer;color:var(--txt);
-          opacity:.8;border:1px solid transparent;border-radius:7px;padding:5px 7px;transition:.15s}
+  /* grid — TR-style: track strip on the left, big trig buttons grouped by 4 */
+  .row{display:grid;grid-template-columns:150px 1fr;align-items:center;gap:12px;margin-bottom:6px}
+  .vlabel{display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--txt);
+          opacity:.85;border:1px solid transparent;border-radius:8px;padding:8px 9px;transition:.15s;
+          background:rgba(160,200,230,0.025)}
   .vlabel:hover{opacity:1}
-  .vlabel.sel{border-color:rgba(127,176,200,0.4);background:rgba(127,176,200,0.06);opacity:1}
-  .vlabel .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .vlabel.sel{border-color:rgba(217,180,138,0.55);background:rgba(217,180,138,0.08);opacity:1}
+  .vlabel .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
   .vlabel .tag{font-size:8px;color:var(--dim)}
-  .ms{display:flex;gap:3px}
-  .ms span{font-size:8px;width:15px;height:15px;line-height:15px;text-align:center;border:1px solid var(--line);
-           border-radius:4px;cursor:pointer;color:var(--dim)}
-  .ms span.on{color:var(--play);border-color:var(--accent)}
-  .ms span.solo.on{color:#9fe0b0;border-color:#9fe0b0}
-  .steps{display:grid;grid-template-columns:repeat(16,1fr);gap:4px}
-  .cell{aspect-ratio:1/1.05;border-radius:5px;border:1px solid var(--line);background:rgba(160,200,230,0.02);
-        cursor:pointer;transition:background .08s,border-color .08s,transform .05s}
-  .cell:hover{border-color:rgba(217,180,138,0.4)}
-  .cell.on{background:var(--on);border-color:var(--on)}
-  .cell.beat{border-color:rgba(160,200,230,0.22)}
-  .cell.cur{transform:scale(1.12);box-shadow:0 0 8px rgba(232,201,160,0.5)}
-  .cell.sel{outline:1.5px solid var(--accent2);outline-offset:1px}
+  .ms{display:flex;gap:4px}
+  .ms span{font-size:9px;width:19px;height:19px;line-height:19px;text-align:center;border:1px solid var(--line);
+           border-radius:5px;cursor:pointer;color:var(--dim)}
+  .ms span.on{color:var(--play);border-color:var(--accent);background:rgba(217,180,138,0.12)}
+  .ms span.solo.on{color:#9fe0b0;border-color:#9fe0b0;background:rgba(159,224,176,0.12)}
+  .steps{display:flex;gap:5px}
+  .cell{flex:1;height:38px;border-radius:7px;border:1px solid var(--line);background:rgba(160,200,230,0.025);
+        cursor:pointer;transition:background .07s,border-color .07s,transform .05s,box-shadow .07s}
+  .cell.grp{background:rgba(160,200,230,0.06)}
+  .cell.gap{margin-left:10px}
+  .cell:hover{border-color:rgba(217,180,138,0.5)}
+  .cell.on{background:var(--on);border-color:var(--on);box-shadow:0 0 7px rgba(217,180,138,0.45)}
+  .cell.beat{border-top:2px solid rgba(217,180,138,0.4)}
+  .cell.cur{transform:translateY(-2px);box-shadow:0 0 12px rgba(232,201,160,0.7)}
+  .cell.sel{outline:2px solid var(--accent2);outline-offset:1px}
+  /* step-number header aligned with the trig buttons */
+  .stephead{display:grid;grid-template-columns:150px 1fr;gap:12px;margin-bottom:6px}
+  .stephead .nums{display:flex;gap:5px}
+  .stephead .nums span{flex:1;text-align:center;font-size:9px;color:var(--dim);letter-spacing:1px}
+  .stephead .nums span.gap{margin-left:10px}
+  .stephead .nums span.beat{color:var(--accent)}
 
   .ctl{display:flex;flex-direction:column;gap:3px;margin-bottom:11px}
   .ctl .lab{display:flex;justify-content:space-between;font-size:9px;color:var(--dim);
@@ -71,6 +80,16 @@
   .hint{font-size:9px;color:rgba(159,196,224,0.25);line-height:1.7;margin-top:6px}
   .filebtn{font-size:9px;padding:4px 7px}
   .divider{height:1px;background:var(--line);margin:14px 0}
+  /* horizontal control strips (channel strip / dust) — knobs laid out in a row */
+  #voiceCtls,#dustCtls{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:4px 18px}
+  #voiceCtls .seg{grid-column:span 1}
+  .transport .play{min-width:92px;font-size:14px;padding:11px 20px}
+  /* the sequencer & pads read left-to-right like a hardware drum machine
+     (beat 1 on the left, playhead moves →), even though the UI is RTL */
+  #seqPanel{padding:18px;direction:ltr}
+  #seqPanel h2,#seqPanel .hint{direction:rtl}
+  #padGrid{direction:ltr}
+  .panel h2{display:flex;align-items:center;gap:8px}
 </style>
 </head>
 <body>
@@ -93,33 +112,26 @@
     <div class="patterns" id="patterns"></div>
   </div>
 
-  <div class="layout">
-    <div class="panel" id="gridPanel">
-      <h2>Sequencer</h2>
-      <div id="grid"></div>
-      <div class="hint">לחיצה על תא = הדלקה/כיבוי · לחיצה ימנית על תא = בחירה לעריכה (Velocity / Probability / Nudge / Ratchet) · לחיצה על שם ערוץ = בחירה למיקסר</div>
+  <div class="panel" id="seqPanel">
+    <h2>Sequencer</h2>
+    <div id="stepHead" class="stephead"></div>
+    <div id="grid"></div>
+    <div class="hint">לחיצה על כפתור = הפעלה/כיבוי · קליק-ימני = עריכת Velocity / Probability / Nudge / Ratchet · קליק על שם הכלי = בחירה לעריכה</div>
+  </div>
+
+  <div class="panel" id="voicePanel" style="margin-top:14px">
+    <h2 id="voiceTitle">Track — Kick</h2>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+      <button class="filebtn" id="loadSample">📁 טען סאמפל</button>
+      <input type="file" id="fileInput" accept="audio/*" style="display:none">
+      <span id="bankInfo" class="hint" style="margin:0">בנק: סינתיסייזר מובנה</span>
     </div>
+    <div id="voiceCtls"></div>
+  </div>
 
-    <div>
-      <div class="panel" id="voicePanel">
-        <h2 id="voiceTitle">Voice — Kick</h2>
-        <button class="filebtn" id="loadSample">📁 טען סאמפל</button>
-        <input type="file" id="fileInput" accept="audio/*" style="display:none">
-        <div id="bankInfo" class="hint">בנק: סינתיסייזר מובנה</div>
-        <div class="divider"></div>
-        <div id="voiceCtls"></div>
-      </div>
-
-      <div class="panel" id="stepPanel" style="margin-top:14px">
-        <h2 id="stepTitle">Step — (בחר תא)</h2>
-        <div id="stepCtls"></div>
-      </div>
-
-      <div class="panel" id="dustPanel" style="margin-top:14px">
-        <h2>Dust · BoC Character</h2>
-        <div id="dustCtls"></div>
-      </div>
-    </div>
+  <div class="panel" id="stepPanel" style="margin-top:14px">
+    <h2 id="stepTitle">Step — (בחר תא)</h2>
+    <div id="stepCtls"></div>
   </div>
 
   <div class="panel" id="refPanel" style="margin-top:16px">
@@ -129,6 +141,11 @@
     <canvas id="waveCanvas" style="width:100%;height:170px;display:block;margin-top:10px;border:1px solid var(--line);border-radius:8px;background:rgba(160,200,230,0.02);cursor:crosshair"></canvas>
     <div id="padGrid" style="display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:10px"></div>
     <div id="sliceEditor"></div>
+  </div>
+
+  <div class="panel" id="dustPanel" style="margin-top:16px">
+    <h2>Dust · BoC Character</h2>
+    <div id="dustCtls"></div>
   </div>
 </div>
 
@@ -163,7 +180,19 @@ DrumSequencer.PATTERN_SLOTS.forEach(slot=>{
 
 // grid
 const grid = document.getElementById('grid');
+function buildStepHead(){
+  const head = document.getElementById('stepHead'); if(!head) return;
+  head.innerHTML='';
+  head.appendChild(el('div')); // spacer over the track-strip column
+  const nums = el('div','nums');
+  for(let s=0;s<seq.numSteps;s++){
+    const n = el('span', (s%4===0?'beat ':'')+(s%4===0&&s>0?'gap':''), String(s+1));
+    nums.appendChild(n);
+  }
+  head.appendChild(nums);
+}
 function buildGrid(){
+  buildStepHead();
   grid.innerHTML='';
   for(let v=0; v<seq.numVoices; v++){
     const row = el('div','row');
@@ -181,7 +210,8 @@ function buildGrid(){
     const steps = el('div','steps');
     for(let s=0;s<seq.numSteps;s++){
       const st = seq.getStep(v,s);
-      const cell = el('div','cell'+(s%4===0?' beat':''));
+      const cls = 'cell' + (s%4===0?' beat':'') + (Math.floor(s/4)%2===1?' grp':'') + (s%4===0&&s>0?' gap':'');
+      const cell = el('div', cls);
       cell.dataset.v=v; cell.dataset.s=s;
       paintCell(cell,st);
       cell.onclick=()=>{ seq.toggleStep(v,s); paintCell(cell,seq.getStep(v,s)); };
@@ -205,7 +235,7 @@ function selectVoice(v){
 }
 function buildVoicePanel(){
   const d = seq.voices[selVoice];
-  document.getElementById('voiceTitle').textContent='Voice — '+d.name;
+  document.getElementById('voiceTitle').textContent='Track — '+d.name;
   const bank = audio.buffers[d.role];
   const slice = audio.slices && audio.slices[selVoice];
   document.getElementById('bankInfo').textContent = bank&&bank.length
