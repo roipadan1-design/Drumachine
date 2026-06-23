@@ -35,9 +35,10 @@ class AudioEngine {
     // ---- master Dust chain (built output-first) --------------------------
     this.masterLP = new T.Filter({ type: 'lowpass', frequency: 18000, Q: 0.4 }).toDestination();
 
-    this.bitcrush = new T.BitCrusher({ bits: 16 });
-    this.bitcrush.wet.value = 0;                 // off until dialed in
-    this.bitcrush.connect(this.masterLP);
+    // Bit reduction via a WaveShaper (amplitude quantisation). Tone's built-in
+    // BitCrusher uses an AudioWorklet, which won't load from file:// and would
+    // sever the master chain — this works everywhere. Curve set in setDust().
+    this.bitcrush = new T.WaveShaper((x) => x, 2048).connect(this.masterLP);
 
     this.tapeSat = new T.Distortion({ distortion: 0.05, oversample: '2x' });
     this.tapeSat.wet.value = 0.15;
@@ -480,8 +481,13 @@ class AudioEngine {
     if ('flutter' in params) this.flutter.depth.value = params.flutter; // 0..1
     if ('tape' in params) this.tapeSat.wet.value = params.tape;
     if ('crush' in params) {
-      this.bitcrush.wet.value = params.crush > 0 ? 1 : 0;
-      this.bitcrush.bits.value = Math.round(16 - params.crush * 12); // 16 -> 4 bits
+      if (params.crush <= 0) {
+        this.bitcrush.setMap((x) => x, 2048);                 // transparent
+      } else {
+        const bits = Math.max(2, Math.round(16 - params.crush * 12)); // 16 -> ~2 bits
+        const levels = Math.pow(2, bits - 1);
+        this.bitcrush.setMap((x) => Math.round(x * levels) / levels, 2048);
+      }
     }
     if ('vinyl' in params) this.vinylGain.gain.rampTo(params.vinyl * 0.08, 0.1);
     if ('masterLP' in params) {
