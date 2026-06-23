@@ -1,2 +1,7 @@
 # rendered demo bounces (regenerate via the render tool)
 demos/
+
+# break loops (large; keep out of git)
+samples/_breaks/*.wav
+samples/_breaks/*.aif
+samples/_breaks/*.aiff

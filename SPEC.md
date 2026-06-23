@@ -36,12 +36,26 @@ Ratchet (1–4×).
 **Dust — the BoC character (master chain):** Wow · Flutter (tape pitch
 wobble) · Tape Saturation · Bitcrush/Downsample · Vinyl Noise · Master LP.
 
+## Working with the samples
+The user's library (Google Drive) is **drum breaks / loops**, not one-shots
+(e.g. *Roygbiv Break*, *Aquarius Break*, *An Eagle In Your Mind Drums 1–5*).
+So the instrument supports **both**:
+- **Break chopper** — load a loop, slice it (transient detection, falling back
+  to equal division) into N slices mapped across the voices; the step grid then
+  rearranges the break. Classic BoC chopping.
+- **One-shots** — each slice is itself a single hit, and per-role sample banks
+  (`samples/<role>/`, auto-loaded via `samples/manifest.json`) still apply and
+  take priority over slices.
+
 ## Status
 - [x] Shared sequencer engine + Node unit test
 - [x] Web prototype: UI, transport, synth fallbacks, Dust chain, sample loading
-- [ ] Drop in real BoC-style samples and tune the synth fallbacks
+- [x] Generative grooves + JSON presets (save/load)
+- [x] Break chopper: transient slicer + per-voice slice playback (verified)
+- [x] Sample auto-loading via manifest
+- [ ] Pull real BoC breaks in and render demos on them
+- [ ] One-shot auto-classification (which slice is kick/snare/hat)
 - [ ] Build the Max for Live device around the shared engine
-- [ ] Preset/pattern save & load
 
 ## Roadmap / open questions for next pass
 1. Polymeter (per-voice step length) — deferred, easy to add to the engine.

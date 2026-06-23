@@ -82,6 +82,8 @@
     <button class="play" id="playBtn">▶ PLAY</button>
     <label class="field">BPM<input type="number" id="bpm" value="86" min="40" max="200"></label>
     <button id="genBtn">✦ GENERATE</button>
+    <button id="breakBtn">⋔ LOAD BREAK</button>
+    <input type="file" id="breakInput" accept="audio/*" style="display:none">
     <button id="saveBtn">⭳ SAVE</button>
     <button id="loadBtn">⭱ LOAD</button>
     <input type="file" id="presetInput" accept="application/json" style="display:none">
@@ -110,6 +112,12 @@
       <div class="panel" id="stepPanel" style="margin-top:14px">
         <h2 id="stepTitle">Step — (בחר תא)</h2>
         <div id="stepCtls"></div>
+      </div>
+
+      <div class="panel" id="chopPanel" style="margin-top:14px">
+        <h2 id="chopTitle">Chop · Break Slicer</h2>
+        <div id="chopInfo" class="hint">לא נטען ברייק. "LOAD BREAK" כדי לחתוך לופ ל-8 פרוסות על פני הערוצים.</div>
+        <div id="chopCtls"></div>
       </div>
 
       <div class="panel" id="dustPanel" style="margin-top:14px">
@@ -194,9 +202,11 @@ function buildVoicePanel(){
   const d = seq.voices[selVoice];
   document.getElementById('voiceTitle').textContent='Voice — '+d.name;
   const bank = audio.buffers[d.role];
+  const slice = audio.slices && audio.slices[selVoice];
   document.getElementById('bankInfo').textContent = bank&&bank.length
     ? 'בנק: '+bank.map((b,i)=>(i===d.sampleIndex?'['+b.name+']':b.name)).join(' · ')
-    : 'בנק: סינתיסייזר מובנה';
+    : (slice ? 'מקור: פרוסת ברייק ('+slice.offset.toFixed(2)+'s, '+slice.duration.toFixed(2)+'s)'
+             : 'בנק: סינתיסייזר מובנה');
   const box = document.getElementById('voiceCtls'); box.innerHTML='';
   box.appendChild(slider('Volume', d.volume,0,1,0.01,v=>Math.round(v*100)+'%',v=>{d.volume=v;audio.applyVoiceParams(selVoice);}));
   box.appendChild(slider('Pan', d.pan,-1,1,0.01,v=>v.toFixed(2),v=>{d.pan=v;audio.applyVoiceParams(selVoice);}));
@@ -290,6 +300,41 @@ document.getElementById('presetInput').onchange=async(e)=>{
   e.target.value='';
 };
 
+// ---------- break chopper ----------
+const chop = { numSlices: 8, mode: 'transient', name: null };
+let lastBreakFile = null;
+document.getElementById('breakBtn').onclick = () => document.getElementById('breakInput').click();
+document.getElementById('breakInput').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  if (!audio.ready) { await audio.init(); audio.onStep = highlightStep;
+    for (let v=0;v<seq.numVoices;v++) audio.applyVoiceParams(v); audio.setDust(dust); }
+  lastBreakFile = f; chop.name = f.name;
+  const r = await audio.loadBreakFromFile(f, { numSlices: chop.numSlices, mode: chop.mode });
+  buildChop(r.slices); buildVoicePanel();
+  e.target.value = '';
+};
+async function rechop(){
+  if(!lastBreakFile) return;
+  const r = await audio.loadBreakFromFile(lastBreakFile, { numSlices: chop.numSlices, mode: chop.mode });
+  buildChop(r.slices); buildVoicePanel();
+}
+function buildChop(sliceCount){
+  document.getElementById('chopInfo').textContent = chop.name
+    ? 'ברייק: '+chop.name+' · '+sliceCount+' פרוסות ('+(chop.mode==='transient'?'טרנזיינטים':'חלוקה שווה')+')'
+    : 'לא נטען ברייק.';
+  const box=document.getElementById('chopCtls'); box.innerHTML='';
+  if(!chop.name) return;
+  box.appendChild(slider('Slices', chop.numSlices,2,16,1,v=>v+'',v=>{chop.numSlices=v;rechop();}));
+  const seg=el('div','ctl'); const lab=el('div','lab'); lab.appendChild(el('span',null,'Mode')); seg.appendChild(lab);
+  const sg=el('div','seg');
+  [['transient','טרנזיינט'],['equal','שווה']].forEach(([m,txt])=>{ const btab=el('button',chop.mode===m?'active':null,txt);
+    btab.onclick=()=>{chop.mode=m;[...sg.children].forEach(c=>c.classList.remove('active'));btab.classList.add('active');rechop();};
+    sg.appendChild(btab); }); seg.appendChild(sg); box.appendChild(seg);
+  const clr=el('button',null,'נקה ברייק'); clr.style.cssText='width:100%;margin-top:6px';
+  clr.onclick=()=>{ audio.clearBreak(); chop.name=null; lastBreakFile=null; buildChop(0); buildVoicePanel(); };
+  box.appendChild(clr);
+}
+
 // ---------- boot: load a gentle BoC-ish starter groove ----------
 function seedGroove(){
   seq.swing=0.18;
@@ -302,10 +347,20 @@ function seedGroove(){
   seq.setStep(P,11,{on:true,velocity:0.4,prob:0.5,ratchet:2});
 }
 seedGroove();
-buildGrid(); buildVoicePanel(); buildDust();
+buildGrid(); buildVoicePanel(); buildDust(); buildChop(0);
 
 // expose for debugging / offline-render tooling
 window.seq = seq; window.audio = audio; window.dust = dust;
+
+// auto-load any sample banks declared in samples/manifest.json (non-fatal)
+audio.loadManifest('../samples').then(r => {
+  if (r.loaded) {
+    console.log('loaded samples:', r.byRole);
+    buildVoicePanel();
+    const tag = document.querySelector('.sub');
+    if (tag) tag.textContent = 'DUSTY STEP SEQUENCER · ' + r.loaded + ' SAMPLES LOADED';
+  }
+});
 </script>
 </body>
 </html>

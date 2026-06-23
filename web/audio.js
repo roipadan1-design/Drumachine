@@ -19,6 +19,8 @@ class AudioEngine {
     this.ready = false;
     this.voices = [];          // per-voice node graphs
     this.buffers = {};         // role -> [Tone.ToneAudioBuffer] user samples
+    this.slices = [];          // per-voice {buffer, offset, duration} from a chopped break
+    this.breakBuffer = null;   // the currently loaded break (for reference/UI)
     this._stepHandle = null;
     this.currentStep = 0;
     this.onStep = null;        // UI callback(stepIndex)
@@ -89,7 +91,12 @@ class AudioEngine {
     vol.connect(sendGain);
     sendGain.connect(this.reverbInput);
 
-    return { index, role, vol, pan, drive, filter, sendGain, player: null, synth: this._makeSynth(role, filter) };
+    // one persistent sample player per voice, created in the current (possibly
+    // offline) context. Buffer is (re)assigned per hit for samples/break slices.
+    const player = new T.Player().connect(filter);
+    player.fadeOut = 0.002; // tiny declick on retrigger
+
+    return { index, role, vol, pan, drive, filter, sendGain, player, synth: this._makeSynth(role, filter) };
   }
 
   /*
@@ -186,32 +193,162 @@ class AudioEngine {
     return this.buffers[role].length - 1;
   }
 
-  _ensurePlayer(voice, buffer) {
-    if (voice.player) voice.player.dispose();
-    voice.player = new Tone.Player(buffer).connect(voice.filter);
+  async loadSampleFromURL(role, url, name) {
+    const buf = new Tone.ToneAudioBuffer();
+    await buf.load(url);
+    if (!this.buffers[role]) this.buffers[role] = [];
+    this.buffers[role].push({ name: name || url.split('/').pop(), buffer: buf });
+    return this.buffers[role].length - 1;
   }
+
+  /*
+   * Auto-load sample banks listed in samples/manifest.json, shaped as
+   *   { "kick": ["kick_a.wav", ...], "snare": [...], ... }
+   * Returns { loaded, byRole }. Missing manifest or files are non-fatal so the
+   * synth fallbacks simply remain in place.
+   */
+  async loadManifest(basePath) {
+    basePath = basePath || '../samples';
+    let manifest;
+    try {
+      const res = await fetch(basePath + '/manifest.json', { cache: 'no-store' });
+      if (!res.ok) return { loaded: 0, byRole: {} };
+      manifest = await res.json();
+    } catch (e) { return { loaded: 0, byRole: {}, error: String(e) }; }
+
+    let loaded = 0; const byRole = {};
+    for (const role of Object.keys(manifest)) {
+      const files = manifest[role] || [];
+      for (const file of files) {
+        try {
+          await this.loadSampleFromURL(role, basePath + '/' + role + '/' + encodeURIComponent(file), file);
+          loaded++; byRole[role] = (byRole[role] || 0) + 1;
+        } catch (e) { /* skip unreadable file, keep going */ }
+      }
+    }
+    return { loaded, byRole };
+  }
+
+  // ---- break chopping ----------------------------------------------------
+  /*
+   * Find slice points in a buffer. mode 'transient' uses energy-onset
+   * detection on a mono mixdown (falling back to equal division when it can't
+   * find enough hits); mode 'equal' just divides the length evenly.
+   * Returns [{ offset, duration }] in seconds.
+   */
+  static sliceBuffer(audioBuffer, numSlices, mode) {
+    const sr = audioBuffer.sampleRate;
+    const len = audioBuffer.length;
+    const dur = len / sr;
+
+    const equal = () => {
+      const out = []; const step = dur / numSlices;
+      for (let i = 0; i < numSlices; i++) out.push({ offset: i * step, duration: step });
+      return out;
+    };
+    if (mode === 'equal') return equal();
+
+    const data = audioBuffer.getChannelData(0);
+    const win = Math.max(1, Math.floor(sr * 0.01));   // 10ms RMS window
+    const hop = Math.max(1, Math.floor(sr * 0.005));  // 5ms hop
+    const env = [];
+    for (let i = 0; i + win < len; i += hop) {
+      let s = 0; for (let j = 0; j < win; j++) { const v = data[i + j]; s += v * v; }
+      env.push({ t: i / sr, e: Math.sqrt(s / win) });
+    }
+    if (!env.length) return equal();
+    let peak = 0; for (const o of env) if (o.e > peak) peak = o.e;
+    if (peak <= 0) return equal();
+
+    const thresh = peak * 0.18;
+    const minGap = 0.05; // 50ms between onsets
+    const onsets = []; let last = -minGap;
+    for (let i = 1; i < env.length; i++) {
+      if (env[i].e > thresh && env[i - 1].e <= thresh && env[i].t - last > minGap) {
+        onsets.push(env[i].t); last = env[i].t;
+      }
+    }
+    if (onsets.length < 2) return equal();
+
+    // a break should start at its beginning; the detector can't see a rising
+    // edge at t=0 (no preceding silence), so anchor the first slice there.
+    if (onsets[0] > 0.02) onsets.unshift(0);
+
+    let pts = onsets;
+    if (pts.length > numSlices) pts = pts.slice(0, numSlices); // keep the first N hits
+    const out = [];
+    for (let i = 0; i < pts.length; i++) {
+      const start = pts[i];
+      const end = (i + 1 < pts.length) ? pts[i + 1] : dur;
+      out.push({ offset: start, duration: end - start });
+    }
+    return out;
+  }
+
+  // Chop a break and map slices across the voices (slice i -> voice i).
+  _applyBreak(buf, opts) {
+    opts = opts || {};
+    const numSlices = opts.numSlices || this.seq.numVoices;
+    const mode = opts.mode || 'transient';
+    const slices = AudioEngine.sliceBuffer(buf.get(), numSlices, mode);
+    this.breakBuffer = buf;
+    this.slices = [];
+    for (let v = 0; v < this.seq.numVoices; v++) {
+      const sl = slices.length ? slices[v % slices.length] : null;
+      this.slices[v] = sl ? { buffer: buf, offset: sl.offset, duration: sl.duration } : null;
+    }
+    return { slices: slices.length, sliceTimes: slices };
+  }
+
+  async loadBreakFromURL(url, opts) {
+    const buf = new Tone.ToneAudioBuffer();
+    await buf.load(url);
+    return this._applyBreak(buf, opts);
+  }
+
+  async loadBreakFromFile(file, opts) {
+    const url = URL.createObjectURL(file);
+    const buf = new Tone.ToneAudioBuffer();
+    await buf.load(url);
+    URL.revokeObjectURL(url);
+    return this._applyBreak(buf, opts);
+  }
+
+  clearBreak() { this.slices = []; this.breakBuffer = null; }
 
   // ---- triggering --------------------------------------------------------
   trigger(voiceIndex, time, velocity) {
     const voice = this.voices[voiceIndex];
     const def = this.seq.voices[voiceIndex];
     const bank = this.buffers[def.role];
+    const slice = this.slices[voiceIndex];
 
-    if (bank && bank[def.sampleIndex]) {
-      this._ensurePlayer(voice, bank[def.sampleIndex].buffer);
-      voice.player.volume.value = Tone.gainToDb(velocity);
-      voice.player.playbackRate = Math.pow(2, (def.pitch || 0) / 12);
-      voice.player.start(time);
+    // priority: user one-shot for this role > break slice > built-in synth
+    let buf = null, offset = 0, duration = null;
+    if (bank && bank[def.sampleIndex]) buf = bank[def.sampleIndex].buffer;
+    else if (slice) { buf = slice.buffer; offset = slice.offset; duration = slice.duration; }
+
+    if (buf) {
+      const pl = voice.player;
+      if (pl.buffer !== buf) pl.buffer = buf;
+      pl.playbackRate = Math.pow(2, (def.pitch || 0) / 12);
+      pl.volume.value = Tone.gainToDb(velocity);
+      // a single persistent Player rejects non-increasing start times; nudge by
+      // a sub-millisecond so colliding ratchet/humanized hits still fire.
+      const t = Math.max(time, (voice._lastStart || 0) + 0.0006);
+      voice._lastStart = t;
+      if (duration != null) pl.start(t, offset, duration);
+      else pl.start(t, offset);
     } else {
-      // uniform synth interface: each voice knows how to play itself
       voice.synth.play(time, velocity, def);
     }
-    // choke groups: cut other voices in the same group
+
+    // choke groups: cut other voices sharing the group
     if (def.chokeGroup) {
       for (let i = 0; i < this.voices.length; i++) {
         if (i === voiceIndex) continue;
-        if (this.seq.voices[i].chokeGroup === def.chokeGroup && this.voices[i].player) {
-          this.voices[i].player.stop(time);
+        if (this.seq.voices[i].chokeGroup === def.chokeGroup) {
+          try { this.voices[i].player.stop(time); } catch (e) { /* not playing */ }
         }
       }
     }
@@ -221,6 +358,7 @@ class AudioEngine {
   start() {
     if (this._stepHandle !== null) return;
     this.currentStep = 0;
+    this.voices.forEach((v) => { v._lastStart = 0; });
     const sixteenth = Tone.Time('16n').toSeconds();
     this._stepHandle = Tone.Transport.scheduleRepeat((time) => {
       const i = this.currentStep;
@@ -295,13 +433,19 @@ class AudioEngine {
     const secPerBar = (60 / bpm) * 4;
     const seconds = bars * secPerBar + 1.2; // tail
 
-    const buffer = await Tone.Offline(async () => {
+    // Pre-load the break OUTSIDE Tone.Offline. Any `await` inside the offline
+    // callback lets the global context revert before render() runs, which
+    // silently breaks sample playback — so the callback below is synchronous.
+    let breakBuf = null;
+    if (opts.breakURL) { breakBuf = new Tone.ToneAudioBuffer(); await breakBuf.load(opts.breakURL); }
+
+    const buffer = await Tone.Offline(() => {
       const eng = new AudioEngine(seq);
-      await eng.init({ offline: true });
+      eng.init({ offline: true });            // synchronous in offline mode (no awaits hit)
+      if (breakBuf) eng._applyBreak(breakBuf, opts.breakOpts);
       for (let v = 0; v < seq.numVoices; v++) eng.applyVoiceParams(v);
       eng.setDust(dust);
 
-      // clear any transport state left over from a previous render in this page
       Tone.Transport.cancel(0);
       Tone.Transport.stop();
       Tone.Transport.position = 0;
