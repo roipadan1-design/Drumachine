@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BoC Drumachine</title>
+<script src="vendor/Tone.js"></script>
+<style>
+  :root{
+    --bg:#06090f; --panel:rgba(160,200,230,0.035); --line:rgba(160,200,230,0.09);
+    --txt:#9fc4e0; --dim:rgba(159,196,224,0.35); --accent:#d9b48a; --accent2:#7fb0c8;
+    --on:#d9b48a; --play:#e8c9a0;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',system-ui,sans-serif;
+       min-height:100vh;padding:18px;letter-spacing:.3px}
+  h1{font-size:12px;font-weight:400;letter-spacing:5px;color:var(--dim);text-transform:uppercase}
+  .sub{font-size:9px;color:rgba(159,196,224,0.22);letter-spacing:2px;margin-top:3px}
+  .wrap{max-width:1080px;margin:0 auto}
+  .topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:14px 0 18px;
+          padding:12px 16px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+  button{font-family:inherit;color:var(--txt);background:transparent;border:1px solid var(--line);
+         border-radius:8px;padding:7px 14px;cursor:pointer;font-size:12px;letter-spacing:1px;
+         transition:.18s}
+  button:hover{border-color:rgba(217,180,138,0.5);color:var(--play)}
+  button.active{border-color:var(--accent);color:var(--play);background:rgba(217,180,138,0.08)}
+  .transport button.play{min-width:74px}
+  .spacer{flex:1}
+  label.field{display:flex;flex-direction:column;gap:4px;font-size:9px;color:var(--dim);
+              letter-spacing:1.5px;text-transform:uppercase}
+  input[type=number]{width:60px;background:transparent;border:1px solid var(--line);color:var(--txt);
+                     border-radius:6px;padding:5px;font-size:13px;text-align:center}
+  input[type=range]{-webkit-appearance:none;height:3px;background:var(--line);border-radius:2px;outline:none}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;border-radius:50%;
+        background:var(--accent2);cursor:pointer}
+  .patterns{display:flex;gap:6px}
+  .patterns button{min-width:34px;padding:7px 0}
+
+  .layout{display:grid;grid-template-columns:1fr 250px;gap:16px;align-items:start}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .panel h2{font-size:9px;letter-spacing:2.5px;color:var(--dim);text-transform:uppercase;margin-bottom:12px}
+
+  /* grid */
+  .row{display:grid;grid-template-columns:118px 1fr;align-items:center;gap:10px;margin-bottom:7px}
+  .vlabel{display:flex;align-items:center;gap:6px;font-size:11px;cursor:pointer;color:var(--txt);
+          opacity:.8;border:1px solid transparent;border-radius:7px;padding:5px 7px;transition:.15s}
+  .vlabel:hover{opacity:1}
+  .vlabel.sel{border-color:rgba(127,176,200,0.4);background:rgba(127,176,200,0.06);opacity:1}
+  .vlabel .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .vlabel .tag{font-size:8px;color:var(--dim)}
+  .ms{display:flex;gap:3px}
+  .ms span{font-size:8px;width:15px;height:15px;line-height:15px;text-align:center;border:1px solid var(--line);
+           border-radius:4px;cursor:pointer;color:var(--dim)}
+  .ms span.on{color:var(--play);border-color:var(--accent)}
+  .ms span.solo.on{color:#9fe0b0;border-color:#9fe0b0}
+  .steps{display:grid;grid-template-columns:repeat(16,1fr);gap:4px}
+  .cell{aspect-ratio:1/1.05;border-radius:5px;border:1px solid var(--line);background:rgba(160,200,230,0.02);
+        cursor:pointer;transition:background .08s,border-color .08s,transform .05s}
+  .cell:hover{border-color:rgba(217,180,138,0.4)}
+  .cell.on{background:var(--on);border-color:var(--on)}
+  .cell.beat{border-color:rgba(160,200,230,0.22)}
+  .cell.cur{transform:scale(1.12);box-shadow:0 0 8px rgba(232,201,160,0.5)}
+  .cell.sel{outline:1.5px solid var(--accent2);outline-offset:1px}
+
+  .ctl{display:flex;flex-direction:column;gap:3px;margin-bottom:11px}
+  .ctl .lab{display:flex;justify-content:space-between;font-size:9px;color:var(--dim);
+            letter-spacing:1px;text-transform:uppercase}
+  .ctl .lab b{color:var(--accent2);font-weight:500}
+  .seg{display:flex;gap:4px}
+  .seg button{flex:1;padding:5px 0;font-size:10px}
+  .hint{font-size:9px;color:rgba(159,196,224,0.25);line-height:1.7;margin-top:6px}
+  .filebtn{font-size:9px;padding:4px 7px}
+  .divider{height:1px;background:var(--line);margin:14px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>BoC Drumachine</h1>
+  <div class="sub">DUSTY STEP SEQUENCER · 8 VOICES · 16 STEPS</div>
+
+  <div class="topbar transport">
+    <button class="play" id="playBtn">▶ PLAY</button>
+    <label class="field">BPM<input type="number" id="bpm" value="86" min="40" max="200"></label>
+    <div class="spacer"></div>
+    <div style="font-size:9px;color:var(--dim);letter-spacing:2px">PATTERN</div>
+    <div class="patterns" id="patterns"></div>
+  </div>
+
+  <div class="layout">
+    <div class="panel" id="gridPanel">
+      <h2>Sequencer</h2>
+      <div id="grid"></div>
+      <div class="hint">לחיצה על תא = הדלקה/כיבוי · לחיצה ימנית על תא = בחירה לעריכה (Velocity / Probability / Nudge / Ratchet) · לחיצה על שם ערוץ = בחירה למיקסר</div>
+    </div>
+
+    <div>
+      <div class="panel" id="voicePanel">
+        <h2 id="voiceTitle">Voice — Kick</h2>
+        <button class="filebtn" id="loadSample">📁 טען סאמפל</button>
+        <input type="file" id="fileInput" accept="audio/*" style="display:none">
+        <div id="bankInfo" class="hint">בנק: סינתיסייזר מובנה</div>
+        <div class="divider"></div>
+        <div id="voiceCtls"></div>
+      </div>
+
+      <div class="panel" id="stepPanel" style="margin-top:14px">
+        <h2 id="stepTitle">Step — (בחר תא)</h2>
+        <div id="stepCtls"></div>
+      </div>
+
+      <div class="panel" id="dustPanel" style="margin-top:14px">
+        <h2>Dust · BoC Character</h2>
+        <div id="dustCtls"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="../engine/sequencer.js"></script>
+<script src="audio.js"></script>
+<script>
+const seq = new DrumSequencer();
+const audio = new AudioEngine(seq);
+let selVoice = 0, selStep = null, playing = false;
+
+// ---------- builders ----------
+function el(tag, cls, txt){ const e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
+
+function slider(label, val, min, max, step, fmt, onInput){
+  const c = el('div','ctl');
+  const lab = el('div','lab'); lab.appendChild(el('span',null,label));
+  const b = el('b',null, fmt(val)); lab.appendChild(b); c.appendChild(lab);
+  const r = el('input'); r.type='range'; r.min=min; r.max=max; r.step=step; r.value=val;
+  r.oninput = ()=>{ const v=parseFloat(r.value); b.textContent=fmt(v); onInput(v); };
+  c.appendChild(r); return c;
+}
+
+// pattern buttons
+const patBox = document.getElementById('patterns');
+DrumSequencer.PATTERN_SLOTS.forEach(slot=>{
+  const btn = el('button',slot==='A'?'active':null,slot); btn.dataset.slot=slot;
+  btn.onclick = ()=>{ seq.selectPattern(slot);
+    [...patBox.children].forEach(c=>c.classList.toggle('active',c.dataset.slot===slot));
+    buildGrid(); };
+  patBox.appendChild(btn);
+});
+
+// grid
+const grid = document.getElementById('grid');
+function buildGrid(){
+  grid.innerHTML='';
+  for(let v=0; v<seq.numVoices; v++){
+    const row = el('div','row');
+    const lbl = el('div','vlabel'+(v===selVoice?' sel':'')); lbl.dataset.v=v;
+    const nm = el('div','nm', seq.voices[v].name); lbl.appendChild(nm);
+    const ms = el('div','ms');
+    const mu = el('span','mute'+(seq.voices[v].mute?' on':''),'M');
+    const so = el('span','solo'+(seq.voices[v].solo?' on':''),'S');
+    mu.onclick=(e)=>{e.stopPropagation();seq.voices[v].mute=!seq.voices[v].mute;mu.classList.toggle('on');audio.applyVoiceParams(v);};
+    so.onclick=(e)=>{e.stopPropagation();seq.voices[v].solo=!seq.voices[v].solo;so.classList.toggle('on');};
+    ms.appendChild(mu); ms.appendChild(so); lbl.appendChild(ms);
+    lbl.onclick=()=>selectVoice(v);
+    row.appendChild(lbl);
+
+    const steps = el('div','steps');
+    for(let s=0;s<seq.numSteps;s++){
+      const st = seq.getStep(v,s);
+      const cell = el('div','cell'+(s%4===0?' beat':''));
+      cell.dataset.v=v; cell.dataset.s=s;
+      paintCell(cell,st);
+      cell.onclick=()=>{ seq.toggleStep(v,s); paintCell(cell,seq.getStep(v,s)); };
+      cell.oncontextmenu=(e)=>{ e.preventDefault(); selectStep(v,s); };
+      steps.appendChild(cell);
+    }
+    row.appendChild(steps); grid.appendChild(row);
+  }
+}
+function paintCell(cell,st){
+  cell.classList.toggle('on',st.on);
+  cell.style.opacity = st.on ? (0.45+0.55*st.velocity) : 1;
+}
+
+// ---------- selection panels ----------
+function selectVoice(v){
+  selVoice=v;
+  [...document.querySelectorAll('.vlabel')].forEach(l=>l.classList.toggle('sel',+l.dataset.v===v));
+  buildVoicePanel();
+}
+function buildVoicePanel(){
+  const d = seq.voices[selVoice];
+  document.getElementById('voiceTitle').textContent='Voice — '+d.name;
+  const bank = audio.buffers[d.role];
+  document.getElementById('bankInfo').textContent = bank&&bank.length
+    ? 'בנק: '+bank.map((b,i)=>(i===d.sampleIndex?'['+b.name+']':b.name)).join(' · ')
+    : 'בנק: סינתיסייזר מובנה';
+  const box = document.getElementById('voiceCtls'); box.innerHTML='';
+  box.appendChild(slider('Volume', d.volume,0,1,0.01,v=>Math.round(v*100)+'%',v=>{d.volume=v;audio.applyVoiceParams(selVoice);}));
+  box.appendChild(slider('Pan', d.pan,-1,1,0.01,v=>v.toFixed(2),v=>{d.pan=v;audio.applyVoiceParams(selVoice);}));
+  box.appendChild(slider('Pitch', d.pitch,-12,12,1,v=>v+' st',v=>{d.pitch=v;}));
+  box.appendChild(slider('Decay', d.decay,0,1,0.01,v=>Math.round(v*100)+'%',v=>{d.decay=v;}));
+  box.appendChild(slider('Filter', d.filterFreq,0,1,0.01,v=>Math.round(v*100)+'%',v=>{d.filterFreq=v;audio.applyVoiceParams(selVoice);}));
+  // filter type segmented
+  const seg = el('div','ctl'); const lab=el('div','lab'); lab.appendChild(el('span',null,'Filter Type')); seg.appendChild(lab);
+  const sg = el('div','seg');
+  ['lp','hp','off'].forEach(t=>{ const b=el('button',d.filterType===t?'active':null,t.toUpperCase());
+    b.onclick=()=>{d.filterType=t;[...sg.children].forEach(c=>c.classList.remove('active'));b.classList.add('active');audio.applyVoiceParams(selVoice);};
+    sg.appendChild(b);}); seg.appendChild(sg); box.appendChild(seg);
+  box.appendChild(slider('Drive', d.drive,0,0.95,0.01,v=>Math.round(v*100)+'%',v=>{d.drive=v;audio.applyVoiceParams(selVoice);}));
+  box.appendChild(slider('Reverb Send', d.reverbSend,0,1,0.01,v=>Math.round(v*100)+'%',v=>{d.reverbSend=v;audio.applyVoiceParams(selVoice);}));
+  box.appendChild(slider('Choke Group', d.chokeGroup,0,4,1,v=>v===0?'none':v,v=>{d.chokeGroup=v;}));
+}
+
+function selectStep(v,s){
+  selVoice=v; selStep={v,s};
+  [...document.querySelectorAll('.cell')].forEach(c=>c.classList.remove('sel'));
+  const cell=document.querySelector('.cell[data-v="'+v+'"][data-s="'+s+'"]'); if(cell)cell.classList.add('sel');
+  const st=seq.getStep(v,s);
+  document.getElementById('stepTitle').textContent='Step '+(s+1)+' — '+seq.voices[v].name;
+  const box=document.getElementById('stepCtls'); box.innerHTML='';
+  box.appendChild(slider('Velocity', st.velocity,0,1,0.01,x=>Math.round(x*100)+'%',x=>{st.velocity=x; if(cell)paintCell(cell,st);}));
+  box.appendChild(slider('Probability', st.prob,0,1,0.01,x=>Math.round(x*100)+'%',x=>{st.prob=x;}));
+  box.appendChild(slider('Nudge', st.nudge,-0.45,0.45,0.01,x=>(x>0?'+':'')+Math.round(x*100)+'%',x=>{st.nudge=x;}));
+  box.appendChild(slider('Ratchet', st.ratchet,1,4,1,x=>x+'×',x=>{st.ratchet=x;}));
+}
+
+// ---------- Dust panel ----------
+const dust={wow:0,flutter:0,tape:0.15,crush:0,vinyl:0,masterLP:1};
+function buildDust(){
+  const box=document.getElementById('dustCtls'); box.innerHTML='';
+  box.appendChild(slider('Swing', seq.swing,0,0.6,0.01,v=>Math.round(v*100)+'%',v=>{seq.swing=v;}));
+  box.appendChild(slider('Humanize Time', seq.humanizeTime,0,1,0.01,v=>Math.round(v*100)+'%',v=>{seq.humanizeTime=v;}));
+  box.appendChild(slider('Humanize Vel', seq.humanizeVel,0,1,0.01,v=>Math.round(v*100)+'%',v=>{seq.humanizeVel=v;}));
+  box.appendChild(el('div','divider'));
+  box.appendChild(slider('Wow', dust.wow,0,1,0.01,v=>Math.round(v*100)+'%',v=>{dust.wow=v;audio.setDust({wow:v});}));
+  box.appendChild(slider('Flutter', dust.flutter,0,1,0.01,v=>Math.round(v*100)+'%',v=>{dust.flutter=v;audio.setDust({flutter:v});}));
+  box.appendChild(slider('Tape Sat', dust.tape,0,1,0.01,v=>Math.round(v*100)+'%',v=>{dust.tape=v;audio.setDust({tape:v});}));
+  box.appendChild(slider('Bitcrush', dust.crush,0,1,0.01,v=>Math.round(v*100)+'%',v=>{dust.crush=v;audio.setDust({crush:v});}));
+  box.appendChild(slider('Vinyl Noise', dust.vinyl,0,1,0.01,v=>Math.round(v*100)+'%',v=>{dust.vinyl=v;audio.setDust({vinyl:v});}));
+  box.appendChild(slider('Master LP', dust.masterLP,0,1,0.01,v=>Math.round(v*100)+'%',v=>{dust.masterLP=v;audio.setDust({masterLP:v});}));
+}
+
+// ---------- transport ----------
+const playBtn=document.getElementById('playBtn');
+playBtn.onclick=async()=>{
+  if(!audio.ready){ await audio.init(); audio.onStep=highlightStep;
+    for(let v=0;v<seq.numVoices;v++) audio.applyVoiceParams(v); audio.setDust(dust); }
+  if(playing){ audio.stop(); playing=false; playBtn.textContent='▶ PLAY'; playBtn.classList.remove('active'); }
+  else{ audio.setBPM(+document.getElementById('bpm').value); audio.start(); playing=true;
+        playBtn.textContent='■ STOP'; playBtn.classList.add('active'); }
+};
+document.getElementById('bpm').oninput=(e)=>{ if(audio.ready)audio.setBPM(+e.target.value); };
+function highlightStep(i){
+  document.querySelectorAll('.cell.cur').forEach(c=>c.classList.remove('cur'));
+  if(i<0)return;
+  document.querySelectorAll('.cell[data-s="'+i+'"]').forEach(c=>c.classList.add('cur'));
+}
+
+// ---------- sample loading ----------
+document.getElementById('loadSample').onclick=()=>document.getElementById('fileInput').click();
+document.getElementById('fileInput').onchange=async(e)=>{
+  const f=e.target.files[0]; if(!f)return;
+  if(!audio.ready){ await audio.init(); audio.onStep=highlightStep; }
+  const role=seq.voices[selVoice].role;
+  const idx=await audio.loadSampleFromFile(role,f);
+  seq.voices[selVoice].sampleIndex=idx;
+  buildVoicePanel();
+  e.target.value='';
+};
+
+// ---------- boot: load a gentle BoC-ish starter groove ----------
+function seedGroove(){
+  seq.swing=0.18;
+  const K=0,S=1,HC=3,HO=4,P=6;
+  [0,7,10].forEach(s=>seq.setStep(K,s,{on:true,velocity:0.95}));
+  [4,12].forEach(s=>seq.setStep(S,s,{on:true,velocity:0.85}));
+  for(let s=0;s<16;s+=2)seq.setStep(HC,s,{on:true,velocity:0.5});
+  seq.setStep(HO,14,{on:true,velocity:0.55});
+  seq.setStep(P,6,{on:true,velocity:0.4,prob:0.6});
+  seq.setStep(P,11,{on:true,velocity:0.4,prob:0.5,ratchet:2});
+}
+seedGroove();
+buildGrid(); buildVoicePanel(); buildDust();
+</script>
+</body>
+</html>
