@@ -53,8 +53,9 @@ So the instrument supports **both**:
 - [x] Generative grooves + JSON presets (save/load)
 - [x] Break chopper: transient slicer + per-voice slice playback (verified)
 - [x] Sample auto-loading via manifest
-- [ ] Pull real BoC breaks in and render demos on them
-- [ ] One-shot auto-classification (which slice is kick/snare/hat)
+- [x] Real BoC breaks chopped + demos rendered (Roygbiv/Aquarius/Telephasic)
+- [x] One-shot auto-extraction: classify hits by band balance into role banks
+- [ ] Wire extracted kits / breaks into the offline render for kit demos
 - [ ] Build the Max for Live device around the shared engine
 
 ## Roadmap / open questions for next pass

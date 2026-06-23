@@ -316,6 +316,77 @@ class AudioEngine {
 
   clearBreak() { this.slices = []; this.breakBuffer = null; }
 
+  // ---- one-shot extraction (classify a break's hits into role banks) -----
+  static _onePoleLP(data, sr, fc) {
+    const rc = 1 / (2 * Math.PI * fc), dt = 1 / sr, a = dt / (rc + dt);
+    const y = new Float32Array(data.length); let prev = 0;
+    for (let i = 0; i < data.length; i++) { prev = prev + a * (data[i] - prev); y[i] = prev; }
+    return y;
+  }
+
+  // Decide a role from coarse band balance + noisiness (zero-crossing rate).
+  static classifyHit(f, dur) {
+    const total = f.low + f.mid + f.high + 1e-9;
+    const lr = f.low / total, mr = f.mid / total, hr = f.high / total;
+    if (lr > 0.5 && f.zcr < 0.06) return 'kick';
+    if (hr > 0.42 || f.zcr > 0.16) return dur > 0.18 ? 'hat_open' : 'hat_closed';
+    if (mr > 0.38) return 'snare';
+    if (lr >= mr && lr >= hr) return 'perc1';
+    return 'perc2';
+  }
+
+  /*
+   * Analyse the loaded break: detect every hit, classify it, copy the region
+   * into its own buffer and add it to that role's bank. The 8-voice machine
+   * then plays the extracted kit (banks take priority over slices). Returns a
+   * per-role count summary. `maxPerRole` caps how many variants each bank keeps.
+   */
+  extractOneShots(opts) {
+    opts = opts || {};
+    const maxPerRole = opts.maxPerRole || 6;
+    if (!this.breakBuffer) return null;
+    const ab = this.breakBuffer.get();
+    const sr = ab.sampleRate;
+    const data = ab.getChannelData(0);
+    const nch = ab.numberOfChannels;
+
+    const hits = AudioEngine.sliceBuffer(ab, 999, 'transient'); // all onsets
+    const lp150 = AudioEngine._onePoleLP(data, sr, 150);
+    const lp1500 = AudioEngine._onePoleLP(data, sr, 1500);
+    const lp6000 = AudioEngine._onePoleLP(data, sr, 6000);
+
+    if (opts.reset) this.buffers = {};
+    const summary = {};
+    for (const h of hits) {
+      const s0 = Math.floor(h.offset * sr);
+      const aEnd = Math.min(data.length, s0 + Math.floor(0.06 * sr)); // 60ms body
+      let low = 0, mid = 0, high = 0, zc = 0; const nn = Math.max(1, aEnd - s0);
+      for (let i = s0; i < aEnd; i++) {
+        const lo = lp150[i], md = lp1500[i] - lp150[i], hi = data[i] - lp6000[i];
+        low += lo * lo; mid += md * md; high += hi * hi;
+        if (i > s0 && ((data[i] >= 0) !== (data[i - 1] >= 0))) zc++;
+      }
+      const f = { low: Math.sqrt(low / nn), mid: Math.sqrt(mid / nn), high: Math.sqrt(high / nn), zcr: zc / nn };
+      const role = AudioEngine.classifyHit(f, h.duration);
+
+      if (!this.buffers[role]) this.buffers[role] = [];
+      if (this.buffers[role].length >= maxPerRole) continue;
+
+      const dur = Math.min(h.duration, 0.5);
+      const len = Math.max(1, Math.floor(dur * sr));
+      const out = Tone.getContext().createBuffer(nch, len, sr);
+      for (let c = 0; c < nch; c++) {
+        const src = ab.getChannelData(c), dst = out.getChannelData(c);
+        for (let i = 0; i < len && s0 + i < src.length; i++) dst[i] = src[s0 + i];
+      }
+      this.buffers[role].push({ name: role + '_' + (this.buffers[role].length + 1), buffer: new Tone.ToneAudioBuffer(out) });
+      summary[role] = (summary[role] || 0) + 1;
+    }
+    for (let v = 0; v < this.seq.numVoices; v++) this.seq.voices[v].sampleIndex = 0;
+    this.clearBreak(); // extracted one-shots replace the chop
+    return summary;
+  }
+
   // ---- triggering --------------------------------------------------------
   trigger(voiceIndex, time, velocity) {
     const voice = this.voices[voiceIndex];

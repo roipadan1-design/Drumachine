@@ -83,6 +83,7 @@
     <label class="field">BPM<input type="number" id="bpm" value="86" min="40" max="200"></label>
     <button id="genBtn">✦ GENERATE</button>
     <button id="breakBtn">⋔ LOAD BREAK</button>
+    <button id="extractBtn" disabled style="opacity:.45">✂ EXTRACT</button>
     <input type="file" id="breakInput" accept="audio/*" style="display:none">
     <button id="saveBtn">⭳ SAVE</button>
     <button id="loadBtn">⭱ LOAD</button>
@@ -311,7 +312,16 @@ document.getElementById('breakInput').onchange = async (e) => {
   lastBreakFile = f; chop.name = f.name;
   const r = await audio.loadBreakFromFile(f, { numSlices: chop.numSlices, mode: chop.mode });
   buildChop(r.slices); buildVoicePanel();
+  const eb = document.getElementById('extractBtn'); eb.disabled = false; eb.style.opacity = 1;
   e.target.value = '';
+};
+document.getElementById('extractBtn').onclick = () => {
+  const sum = audio.extractOneShots({ reset: true, maxPerRole: 6 });
+  if (!sum) return;
+  chop.name = null; lastBreakFile = null; buildChop(0);
+  buildGrid(); buildVoicePanel();
+  const txt = Object.keys(sum).map(r => r + ':' + sum[r]).join(' · ');
+  const tag = document.querySelector('.sub'); if (tag) tag.textContent = 'EXTRACTED ONE-SHOTS · ' + txt;
 };
 async function rechop(){
   if(!lastBreakFile) return;
